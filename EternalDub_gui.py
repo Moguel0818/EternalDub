@@ -10,9 +10,9 @@ Janela:
   * embaixo ....... ondas sonoras: filme (verde) e dublagem (laranja) na mesma linha do tempo.
                     Arraste a faixa laranja para mudar o atraso; roda do mouse = zoom.
 
-Tudo e montado SEM recodificar (copia dos fluxos).  Veja EternalDub_core.py.
+O filme e montado SEM recodificar (copia dos fluxos).  Veja EternalDub_core.py.
 Idiomas da interface: portugues (Brasil) e ingles. Veja EternalDub_i18n.py.
-Requisitos: Python 3.9+, numpy, PySide6, FFmpeg  (mkvmerge recomendado).
+Requisitos: Python 3.9+, numpy, PySide6, FFmpeg.
 """
 import math
 import os
@@ -52,7 +52,7 @@ except ImportError:                     # sem o arquivo de idiomas: avisa (em po
 
 # Os arquivos .py do EternalDub precisam ser da MESMA versao. Se a pasta tiver arquivos misturados
 # (ex.: "EternalDub_core (1).py" baixado ao lado do antigo), o programa avisa logo ao abrir.
-VERSAO_ARQUIVOS = "1.0"
+VERSAO_ARQUIVOS = "1.1"
 ARQUIVOS = ("EternalDub_gui.py", "EternalDub_core.py", "EternalDub_i18n.py", "detectar_atraso.py")
 try:
     if i18n is None:
@@ -287,6 +287,7 @@ class OndaWidget(QWidget):
         self.escala_dub = 1.0
         self.atraso = 0.0           # segundos
         self.atempo = 1.0
+        self.trechos = None         # [[ini_filme, fim_filme, ini_dub], ...] (sincronia por trechos)
         self.t0 = -2.0              # tempo (s) na borda esquerda
         self.pps = 12.0             # pixels por segundo
         self.rot_ref = tr("Filme (referência)")
@@ -318,9 +319,14 @@ class OndaWidget(QWidget):
         self.rot_dub = rotulo or tr("Dublagem")
         self.update()
 
-    def set_atraso(self, ms, atempo=1.0):
+    def set_atraso(self, ms, atempo=1.0, trechos=None):
         self.atraso = ms / 1000.0
         self.atempo = atempo
+        if trechos:
+            t = np.asarray(trechos, dtype=np.float64)
+            self.trechos = (t[:, 0], t[:, 1], t[:, 2])
+        else:
+            self.trechos = None
         self.update()
 
     def ver_inicio(self):
@@ -329,13 +335,22 @@ class OndaWidget(QWidget):
         self.update()
 
     # ---- desenho
-    def _extremos(self, vmin, vmax, n, atraso, atempo, w):
+    def _extremos(self, vmin, vmax, n, atraso, atempo, w, trechos=None):
         xs = np.arange(w + 1, dtype=np.float64)
-        s = ((self.t0 + xs / self.pps) - atraso) * atempo * core.ENV_RATE
+        tt = self.t0 + xs / self.pps
+        dentro = np.ones(w + 1, bool)
+        if trechos is not None:                     # sincronia por trechos: cada pedaco tem seu atraso
+            fi, ff, di = trechos
+            tt = tt - atraso                        # atraso = ajuste fino somado ao mapa
+            k = np.clip(np.searchsorted(fi, tt, side="right") - 1, 0, len(fi) - 1)
+            dentro = (tt >= fi[k]) & (tt < ff[k])
+            s = (di[k] + (tt - fi[k]) * atempo) * core.ENV_RATE
+        else:
+            s = (tt - atraso) * atempo * core.ENV_RATE
         idx = np.floor(s).astype(np.int64)
         a = idx[:-1]
         b = np.maximum(idx[1:], a + 1)
-        ok = (b > 0) & (a < n)
+        ok = (b > 0) & (a < n) & dentro[:-1] & dentro[1:]
         a = np.clip(a, 0, n - 1)
         b = np.clip(b, 1, n)
         b = np.maximum(b, a + 1)
@@ -346,7 +361,7 @@ class OndaWidget(QWidget):
         mx = np.maximum.reduceat(vmax, inter)[0::2]
         return mn, mx, ok
 
-    def _faixa(self, p, dados, escala, atraso, atempo, y0, h, cor, rotulo):
+    def _faixa(self, p, dados, escala, atraso, atempo, y0, h, cor, rotulo, trechos=None):
         w = self.width()
         p.fillRect(0, y0, w, h, QColor(22, 22, 22))
         p.setPen(QColor(50, 50, 50))
@@ -358,7 +373,7 @@ class OndaWidget(QWidget):
             p.drawText(10, int(meio), tr("(sem onda - %s)") % rotulo)
             return
         vmin, vmax, n = dados
-        mn, mx, ok = self._extremos(vmin, vmax, n, atraso, atempo, w)
+        mn, mx, ok = self._extremos(vmin, vmax, n, atraso, atempo, w, trechos)
         p.setPen(cor)
         for x in range(w):
             if not ok[x]:
@@ -366,6 +381,13 @@ class OndaWidget(QWidget):
             ya = int(meio - float(mx[x]) * escala * amp)
             yb = int(meio - float(mn[x]) * escala * amp)
             p.drawLine(x, ya, x, max(yb, ya + 1))
+        if trechos is not None:                     # marca as emendas (vermelho) do mapa por trechos
+            p.setPen(QColor(230, 70, 70))
+            fi, ff, _ = trechos
+            for t in np.concatenate([fi[1:], ff[:-1]]) + atraso:
+                x = int((t - self.t0) * self.pps)
+                if 0 <= x < w:
+                    p.drawLine(x, y0 + 2, x, y0 + h - 2)
         p.setPen(QColor(220, 220, 220))
         p.drawText(8, y0 + 14, rotulo)
 
@@ -390,8 +412,13 @@ class OndaWidget(QWidget):
         p.fillRect(0, 0, w, h, QColor(18, 18, 18))
         fh = max(20, (h - self.TOPO) // 2)
         self._faixa(p, self.ref, self.escala_ref, 0.0, 1.0, self.TOPO, fh, QColor(70, 190, 110), self.rot_ref)
+        if self.trechos is not None:
+            rot = tr("%s   (sincronia por trechos: %d trechos, ajuste %+d ms)") % (
+                self.rot_dub, len(self.trechos[0]), int(round(self.atraso * 1000)))
+        else:
+            rot = tr("%s   (atraso %+d ms)") % (self.rot_dub, int(round(self.atraso * 1000)))
         self._faixa(p, self.dub, self.escala_dub, self.atraso, self.atempo, self.TOPO + fh, fh,
-                    QColor(240, 160, 60), tr("%s   (atraso %+d ms)") % (self.rot_dub, int(round(self.atraso * 1000))))
+                    QColor(240, 160, 60), rot, self.trechos)
         self._regua(p, w)
         x0 = int((0 - self.t0) * self.pps)         # marca do tempo zero
         if 0 <= x0 < w:
@@ -523,9 +550,6 @@ class Janela(QMainWindow):
         if not core.ffmpeg_ok(self.ferr):
             self.log(tr("ATENÇÃO: FFmpeg não encontrado. Instale o FFmpeg ou use Opções > Localizar FFmpeg."))
         self.log(tr("Montagem: %s | %s") % (self.motor, core.versoes(self.ferr)))
-        if not self.ferr.mkvmerge:
-            self.log(tr("mkvmerge não encontrado: a montagem usa o FFmpeg. Instalar o MKVToolNix (só o programa; a "
-                        "janela dele não precisa ser usada) deixa o EternalDub usar o mkvmerge, que é o recomendado."))
 
     # ------------------------------------------------ construcao
     def _acao(self, texto, slot, atalho=None, icone=None, dica=None):
@@ -555,7 +579,10 @@ class Janela(QMainWindow):
                                     tr("Ex.: usar a faixa em inglês da mesma fonte e aplicar a todas as dublagens dela"))
         self.a_det_vid = self._acao(tr("Detectar pelo vídeo (lento)..."), self.acao_detectar_video, None, None,
                                     tr("Compara os cortes de cena dos vídeos"))
-        self.a_zero = self._acao(tr("Zerar atraso e velocidade"), self.acao_zerar)
+        self.a_mapa = self._acao(tr("Sincronizar trecho por trecho..."), self.acao_mapear, "Ctrl+M", None,
+                                 tr("Para versões com cortes diferentes: mede o atraso a cada segundo e monta a "
+                                    "dublagem pedaço por pedaço"))
+        self.a_zero = self._acao(tr("Zerar atraso, velocidade e trechos"), self.acao_zerar)
         self.a_teste = self._acao(tr("Gerar teste (5 min)"), lambda *_: self.acao_gerar(True), "F6", S.SP_MediaPlay,
                                   tr("Gera só os 5 primeiros minutos para conferir a sincronia"))
         self.a_final = self._acao(tr("Gerar arquivo final"), lambda *_: self.acao_gerar(False), "F7",
@@ -592,7 +619,7 @@ class Janela(QMainWindow):
         for a in (self.a_add, self.a_rem, self.a_sobe, self.a_desce):
             m.addAction(a)
         m = mb.addMenu(tr("Sincronização"))
-        for a in (self.a_det, self.a_det_arq, self.a_det_completo, self.a_det_vid):
+        for a in (self.a_det, self.a_det_arq, self.a_det_completo, self.a_det_vid, self.a_mapa):
             m.addAction(a)
         m.addSeparator()
         m.addAction(self.a_zero)
@@ -610,7 +637,7 @@ class Janela(QMainWindow):
         grupo = QActionGroup(self)
         grupo.setExclusive(True)
         self.a_m_ff = QAction(tr("FFmpeg (cópia sem recodificar)"), self, checkable=True)
-        self.a_m_mk = QAction(tr("mkvmerge (cópia sem recodificar - recomendado)") if self.ferr.mkvmerge
+        self.a_m_mk = QAction(tr("mkvmerge (cópia sem recodificar)") if self.ferr.mkvmerge
                               else tr("mkvmerge (não encontrado)"), self, checkable=True)
         self.a_m_mk.setEnabled(bool(self.ferr.mkvmerge))
         for a, nome in ((self.a_m_ff, "ffmpeg"), (self.a_m_mk, "mkvmerge")):
@@ -710,8 +737,13 @@ class Janela(QMainWindow):
         self.b_det.clicked.connect(self.acao_detectar)
         self.b_det2 = QPushButton(tr("Detectar usando outra faixa do arquivo..."))
         self.b_det2.clicked.connect(self.acao_detectar_faixa_arquivo)
+        self.b_mapa = QPushButton(tr("Sincronizar trecho por trecho..."))
+        self.b_mapa.setToolTip(tr("Para versões com cortes diferentes: mede o atraso a cada segundo e monta a "
+                                  "dublagem pedaço por pedaço"))
+        self.b_mapa.clicked.connect(self.acao_mapear)
         linha.addWidget(self.b_det)
         linha.addWidget(self.b_det2)
+        linha.addWidget(self.b_mapa)
         linha.addStretch(1)
         g.addLayout(linha, 5, 0, 1, 8)
         self.editor = box
@@ -824,8 +856,10 @@ class Janela(QMainWindow):
         self.a_det_arq.setEnabled(tem_film and tem_dub and not ocupado)
         self.a_det_vid.setEnabled(tem_film and tem_dub and not ocupado)
         self.a_det_completo.setEnabled(tem_film and tem_dub and not ocupado)
+        self.a_mapa.setEnabled(tem_film and tem_dub and not ocupado)
         self.b_det.setEnabled(tem_film and tem_dub and not ocupado)
         self.b_det2.setEnabled(tem_film and tem_dub and not ocupado)
+        self.b_mapa.setEnabled(tem_film and tem_dub and not ocupado)
         self.a_rem.setEnabled(tem_dub and not ocupado)
         self.a_teste.setEnabled(tem_film and bool(self.dubs) and not ocupado)
         self.a_final.setEnabled(tem_film and bool(self.dubs) and not ocupado)
@@ -1180,15 +1214,22 @@ class Janela(QMainWindow):
         self.tab.blockSignals(True)
         self.tab.setRowCount(len(self.dubs))
         for i, d in enumerate(self.dubs):
-            vel = "  (x%.4f)" % (1.0 / d.atempo) if abs(d.atempo - 1.0) > 1e-9 else ""
             vals = [str(i + 1), d.nome, tr("%s : faixa %d") % (os.path.basename(d.arquivo), d.faixa),
-                    "%+d%s" % (d.atraso_ms, vel), tr("Sim") if d.padrao else "", d.status]
+                    self._texto_atraso(d), tr("Sim") if d.padrao else "", d.status]
             for c, v in enumerate(vals):
                 self.tab.setItem(i, c, QTableWidgetItem(v))
         self.tab.blockSignals(False)
         if self.dubs:
             self.tab.selectRow(max(0, min(selecionar, len(self.dubs) - 1)))
         self._ao_selecionar()
+
+    @staticmethod
+    def _texto_atraso(d):
+        vel = "  (x%.4f)" % (1.0 / d.atempo) if abs(d.atempo - 1.0) > 1e-9 else ""
+        if d.trechos:
+            aj = ("  %+d" % d.atraso_ms) if d.atraso_ms else ""
+            return tr("%d trechos") % len(d.trechos) + aj + vel
+        return "%+d%s" % (d.atraso_ms, vel)
 
     def _ao_selecionar(self):
         d = self._dub_atual()
@@ -1199,8 +1240,12 @@ class Janela(QMainWindow):
             self.sp_atraso.setValue(d.atraso_ms)
             self.chk_padrao.setChecked(d.padrao)
             self.lbl_origem.setText(tr("%s  -  faixa %d  (%s)") % (d.arquivo, d.faixa, d.detalhe))
-            self.lbl_vel.setText(tr("normal") if abs(d.atempo - 1.0) < 1e-9 else
-                                 tr("corrigida (atempo=%.6f; só esta dublagem será convertida para FLAC)") % d.atempo)
+            txt = tr("normal") if abs(d.atempo - 1.0) < 1e-9 else \
+                tr("corrigida (atempo=%.6f; só esta dublagem será convertida para FLAC)") % d.atempo
+            if d.trechos:
+                txt += "   |   " + tr("sincronia por trechos: %d trechos (o Atraso acima é um ajuste fino somado a "
+                                       "todos; só esta dublagem vira FLAC)") % len(d.trechos)
+            self.lbl_vel.setText(txt)
         else:
             self.ed_nome.clear()
             self.ed_idioma.clear()
@@ -1209,7 +1254,7 @@ class Janela(QMainWindow):
         self._carregando = False
         self._atualizar_estado()
         if d:
-            self.onda.set_atraso(d.atraso_ms, d.atempo)
+            self.onda.set_atraso(d.atraso_ms, d.atempo, d.trechos)
             self._carregar_onda_dub(d)
         else:
             self.onda.set_dub(None)
@@ -1243,7 +1288,7 @@ class Janela(QMainWindow):
     def acao_zerar(self, *_):
         d = self._dub_atual()
         if d:
-            d.atraso_ms, d.atempo, d.status = 0, 1.0, ""
+            d.atraso_ms, d.atempo, d.status, d.trechos = 0, 1.0, "", None
             self._refresh_tabela()
 
     # ------------------------------------------------ editor
@@ -1262,9 +1307,8 @@ class Janela(QMainWindow):
         d = self._dub_atual()
         if d and not self._carregando:
             d.atraso_ms = int(valor)
-            vel = "  (x%.4f)" % (1.0 / d.atempo) if abs(d.atempo - 1.0) > 1e-9 else ""
-            self.tab.item(self.tab.currentRow(), 3).setText("%+d%s" % (d.atraso_ms, vel))
-            self.onda.set_atraso(d.atraso_ms, d.atempo)
+            self.tab.item(self.tab.currentRow(), 3).setText(self._texto_atraso(d))
+            self.onda.set_atraso(d.atraso_ms, d.atempo, d.trechos)
 
     def _ed_padrao(self, marcado):
         d = self._dub_atual()
@@ -1293,7 +1337,7 @@ class Janela(QMainWindow):
         def job(msg, prog, cancelar):
             return core.detectar(caminho, ref, d.arquivo, d.faixa, cancelar, msg, prog)
         self._submeter(tr("Detectando o atraso (análise rápida: lê só trechos do filme)"), job,
-                       lambda r: self._aplicar_resultado([d], r))
+                       lambda r: self._aplicar_resultado([d], r, (d.arquivo, d.faixa)))
 
     def acao_detectar_faixa_arquivo(self, *_):
         d = self._dub_atual()
@@ -1319,7 +1363,7 @@ class Janela(QMainWindow):
         def job(msg, prog, cancelar):
             return core.detectar(caminho, ref, origem, pos, cancelar, msg, prog)
         self._submeter(tr("Detectando o atraso (faixa %d do arquivo)") % pos, job,
-                       lambda r: self._aplicar_resultado(alvos, r))
+                       lambda r: self._aplicar_resultado(alvos, r, (origem, pos)))
 
     def acao_detectar_completo(self, *_):
         d = self._dub_atual()
@@ -1340,7 +1384,8 @@ class Janela(QMainWindow):
 
         def job(msg, prog, cancelar):
             return core.detectar(caminho, ref, d.arquivo, d.faixa, cancelar, msg, prog, completo=True)
-        self._submeter(tr("Detectando o atraso (análise completa)"), job, lambda res: self._aplicar_resultado([d], res))
+        self._submeter(tr("Detectando o atraso (análise completa)"), job,
+                       lambda res: self._aplicar_resultado([d], res, (d.arquivo, d.faixa)))
 
     def acao_detectar_video(self, *_):
         d = self._dub_atual()
@@ -1357,9 +1402,11 @@ class Janela(QMainWindow):
 
         def job(msg, prog, cancelar):
             return core.detectar_video(film, d.arquivo, msg, cancelar)
-        self._submeter(tr("Detectando o atraso pelo vídeo"), job, lambda res: self._aplicar_resultado([d], res))
+        self._submeter(tr("Detectando o atraso pelo vídeo"), job,
+                       lambda res: self._aplicar_resultado([d], res, (d.arquivo, d.faixa)))
 
-    def _aplicar_resultado(self, alvos, r):
+    def _aplicar_resultado(self, alvos, r, medida=None):
+        """medida = (arquivo, faixa) usados na medicao (a sincronia por trechos mede com a mesma faixa)."""
         st, conf = r["status"], r["confianca"]
         self.log(tr("Resultado (%s): %s, confiança %s, atraso %+d ms, velocidade x%.5f") %
                  (rot_metodo(r["metodo"]), i18n.rot_status(st), rot_conf(conf), r["atraso_ms"], 1.0 / r["atempo"]))
@@ -1384,7 +1431,7 @@ class Janela(QMainWindow):
             return
         if st == "OK":
             for a in alvos:
-                a.atraso_ms, a.atempo = r["atraso_ms"], 1.0
+                a.atraso_ms, a.atempo, a.trechos = r["atraso_ms"], 1.0, None
                 a.status = tr("detectado: %s, confiança %s") % (rot_metodo(r["metodo"]), rot_conf(conf))
         elif st in ("VELOCIDADE", "DERIVA"):
             if st == "VELOCIDADE":
@@ -1400,7 +1447,7 @@ class Janela(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             sim = resp == QMessageBox.StandardButton.Yes
             for a in alvos:
-                a.atraso_ms = r["atraso_ms"]
+                a.atraso_ms, a.trechos = r["atraso_ms"], None
                 a.atempo = r["atempo"] if sim else 1.0
                 a.status = (tr("velocidade corrigida (x%.4f), confiança %s") % (1 / r["atempo"], rot_conf(conf)) if sim
                             else tr("velocidade DIFERENTE, confiança %s") % rot_conf(conf))
@@ -1410,18 +1457,121 @@ class Janela(QMainWindow):
             cab = (tr("As versões têm CORTES diferentes: o atraso muda ao longo do filme (tempos do filme).")
                    if r.get("tempo_grupos") == "filme" else
                    tr("As versões têm CORTES diferentes: o atraso muda ao longo do filme."))
-            resp = QMessageBox.question(
-                self, NOME_APP,
-                cab + "\n\n" + "\n".join(linhas[:12]) + "\n\n" +
-                tr("Um único atraso não serve para o filme inteiro (juntar trechos ainda não existe nesta versão).\n"
-                   "Usar o atraso do primeiro trecho (%+d ms)?") % r["atraso_ms"],
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            self.log(tr("Trechos com atrasos diferentes: %s") % "; ".join(linhas))
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(NOME_APP)
+            box.setText(cab + "\n\n" + "\n".join(linhas[:12]))
+            box.setInformativeText(
+                tr("Um único atraso deixa parte das falas fora do lugar.\n\n"
+                   "Sincronizar trecho por trecho (recomendado): o EternalDub mede o atraso a cada segundo e monta a "
+                   "dublagem pedaço por pedaço. Onde a dublagem não tem um pedaço do filme entra silêncio; onde ela "
+                   "tem algo que não existe no filme, esse pedaço sai (de preferência numa pausa). Só a dublagem "
+                   "vira FLAC (sem perdas); o filme não é tocado."))
+            b_mapa = box.addButton(tr("Sincronizar trecho por trecho"), QMessageBox.ButtonRole.AcceptRole)
+            b_um = box.addButton(tr("Usar um atraso só (%+d ms)") % r["atraso_ms"], QMessageBox.ButtonRole.ActionRole)
+            box.addButton(tr("Cancelar"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(b_mapa)
+            box.exec()
             for a in alvos:
                 a.status = tr("CORTES diferentes - ver registro")
-                if resp == QMessageBox.StandardButton.Yes:
-                    a.atraso_ms, a.atempo = r["atraso_ms"], 1.0
-            self.log(tr("Trechos com atrasos diferentes: %s") % "; ".join(linhas))
+            if box.clickedButton() is b_um:
+                for a in alvos:
+                    a.atraso_ms, a.atempo, a.trechos = r["atraso_ms"], 1.0, None
+            elif box.clickedButton() is b_mapa:
+                arq, faixa = medida or (alvos[0].arquivo, alvos[0].faixa)
+                self._iniciar_mapa(alvos, arq, faixa, r.get("atempo", 1.0), r["atraso_ms"],
+                                   [g["atraso_ms"] for g in r["grupos"]])
         self._refresh_tabela()
+
+    # ------------------------------------------------ sincronia por trechos
+    def acao_mapear(self, *_):
+        d = self._dub_atual()
+        if not (self.film and d) or self._ocupado():
+            return
+        try:
+            arq = core.sondar_arquivo(d.arquivo)
+        except Exception as e:
+            self.erro(tr("Não consegui abrir o arquivo"), str(e))
+            return
+        pos = d.faixa
+        if len(arq.audios) > 1:
+            itens = ["%d: %s" % (f.pos, f.rotulo()) for f in arq.audios]
+            item, ok = QInputDialog.getItem(
+                self, tr("Faixa usada na medição"),
+                tr("Medir trecho por trecho usando qual faixa deste arquivo?\n"
+                   "(a própria dublagem funciona; uma faixa no idioma original da mesma fonte costuma ser ainda "
+                   "melhor, e aí o resultado vale para TODAS as dublagens deste arquivo)"),
+                itens, d.faixa, False)
+            if not ok:
+                return
+            pos = int(item.split(":")[0])
+        alvos = [d] if pos == d.faixa else \
+            [x for x in self.dubs if os.path.abspath(x.arquivo) == os.path.abspath(d.arquivo)]
+        centro = None if (d.trechos or (d.atraso_ms == 0 and abs(d.atempo - 1.0) < 1e-9)) else d.atraso_ms
+        self._iniciar_mapa(alvos, d.arquivo, pos, d.atempo if centro is not None else 1.0, centro, None)
+
+    def _iniciar_mapa(self, alvos, arquivo, faixa, atempo, centro_ms, grupos_ms):
+        caminho, ref = self.film.caminho, self._ref_pos()
+        try:
+            gb = os.path.getsize(caminho) / 1e9
+        except OSError:
+            gb = 0
+        if not core.em_cache(caminho, ref):
+            r = QMessageBox.question(
+                self, NOME_APP,
+                tr("A sincronia por trechos precisa do áudio INTEIRO do filme (%.0f GB) e da dublagem. A onda do "
+                   "filme ainda não foi lida por completo, então o filme será lido agora (num HD pode levar vários "
+                   "minutos; fica guardado para as próximas vezes). Continuar?") % gb,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+
+        def job(msg, prog, cancelar):
+            return core.mapear(caminho, ref, arquivo, faixa, atempo, centro_ms, grupos_ms, cancelar, msg, prog)
+        self._submeter(tr("Sincronizando trecho por trecho"), job, lambda m: self._aplicar_mapa(alvos, m))
+
+    def _aplicar_mapa(self, alvos, m):
+        n = len(m["pedacos"])
+        self.log(tr("Sincronia por trechos: %d trechos, %d emendas; o mapa concorda com %.0f%% dos pontos medidos "
+                    "com segurança.") % (len(m["trechos"]), len(m["cortes"]), m["concordancia"]))
+        for t in m["trechos"]:
+            self.log(tr("   %s a %s: atraso %+d ms") % (fmt_tempo(max(0.0, t["ini"])), fmt_tempo(t["fim"]),
+                                                       round(t["atraso"] * 1000)))
+        for c in m["cortes"]:
+            if c["delta"] > 0:
+                self.log(tr("   emenda em %s: %d ms de silêncio (a dublagem não tem esse pedaço)")
+                         % (fmt_tempo(c["t"]), round(c["delta"] * 1000)))
+            else:
+                self.log(tr("   emenda em %s: saem %d ms da dublagem (pedaço que não existe no filme)")
+                         % (fmt_tempo(c["t"]), round(-c["delta"] * 1000)))
+        resumo = [tr("Trechos: %d   (emendas: %d)") % (len(m["trechos"]), len(m["cortes"])),
+                  tr("Concorda com %.0f%% dos pontos medidos com segurança") % m["concordancia"],
+                  tr("Silêncio inserido no total: %.1f s") % m["silencio_s"],
+                  tr("Dublagem removida no total: %.1f s") % m["removido_s"]]
+        if m["inicio_fora_s"] > 0.5:
+            resumo.append(tr("Começo da dublagem que fica antes do filme (não entra): %.1f s") % m["inicio_fora_s"])
+        if m["fim_fora_s"] > 0.5:
+            resumo.append(tr("Fim da dublagem que passa do filme (não entra): %.1f s") % m["fim_fora_s"])
+        for linha in resumo:
+            self.log(linha)
+        if len(m["trechos"]) <= 1 and abs(m["atempo"] - 1.0) < 1e-9:
+            atr = int(round(m["trechos"][0]["atraso"] * 1000)) if m["trechos"] else 0
+            for a in alvos:                     # um trecho so: atraso simples, montado por copia exata
+                a.atraso_ms, a.atempo, a.trechos = atr, 1.0, None
+                a.status = tr("um atraso só serve (%+d ms)") % atr
+            self._refresh_tabela()
+            self.aviso(tr("O mapa achou um único trecho: um atraso só (%+d ms) serve para o filme inteiro.") % atr)
+            return
+        for a in alvos:
+            a.trechos = [list(x) for x in m["pedacos"]]
+            a.atempo, a.atraso_ms = m["atempo"], 0
+            a.status = tr("sincronia por trechos: %d trechos") % n
+        self._refresh_tabela()
+        self.aviso(tr("Sincronia por trechos pronta.\n\n%s\n\nA onda mostra a dublagem já no lugar (as emendas "
+                      "ficam marcadas em vermelho). A lista completa das emendas está no Registro.\n\n"
+                      "Confira com Gerar teste (5 min) e, no arquivo final, ouça alguns pontos das emendas.")
+                   % "\n".join(resumo))
 
     # ------------------------------------------------ montagem
     def acao_gerar(self, teste):
@@ -1480,7 +1630,7 @@ class Janela(QMainWindow):
 
         def pronto(res):
             saida, conf = res
-            self.log(tr("Pronto (%s): %s") % (motor, saida))
+            self.log(tr("Pronto (%s): %s") % ("ffmpeg" if teste else motor, saida))
             linhas, mudas, fora = [], [], []
             for c in conf:
                 buracos = c.get("sem_audio_em") or []
@@ -1499,6 +1649,12 @@ class Janela(QMainWindow):
                 if buracos:
                     txt += "; " + tr("SEM ÁUDIO por volta de %s (a dublagem acaba antes ou tem um buraco ali?)") % \
                         ", ".join(fmt_tempo(t) for t in buracos)
+                if c.get("entrelacamento_s") is not None:
+                    if c["entrelacamento_s"] > 2.0:
+                        txt += "; " + tr("ATENÇÃO: o áudio ficou gravado até %.0f s longe do vídeo dentro do arquivo "
+                                         "(alguns players ficam mudos nesses pontos)") % c["entrelacamento_s"]
+                    else:
+                        txt += "; " + tr("áudio bem entrelaçado com o vídeo")
                 linhas.append("%s: %s" % (c["nome"], txt))
                 self.log(tr("Conferência - %s") % linhas[-1])
             resumo = "\n".join(linhas)
@@ -1644,11 +1800,11 @@ class Janela(QMainWindow):
                "onda)  4) <i>Gerar teste</i> e confira  5) <i>Gerar arquivo final</i>.") +
             "<br><br>" +
             tr("Se a dublagem tiver velocidade diferente (ex.: PAL), o programa avisa e corrige só a dublagem. "
-               "Se as versões tiverem cortes diferentes, ele mostra os trechos.") +
+               "Se as versões tiverem cortes diferentes, ele sincroniza a dublagem trecho por trecho.") +
             "<br><br><b>" + tr("Créditos") + "</b><br>" +
             tr("Criação, testes e direção do projeto: %s") % AUTOR + "<br>" +
             tr("Código escrito com auxílio de IA (Claude, da Anthropic).") + "<br>" +
-            tr("Usa: FFmpeg, MKVToolNix (mkvmerge), Qt for Python (PySide6) e NumPy.") + "<br>" +
+            tr("Usa: FFmpeg, Qt for Python (PySide6) e NumPy.") + "<br>" +
             tr("Colaboradores: veja CREDITS.md e a página do projeto.") + "<br><br>" +
             tr("Software livre e de código aberto (licença %s).") % LICENCA + "<br>" +
             '<a href="%s">%s</a>' % (URL_PROJETO, URL_PROJETO))

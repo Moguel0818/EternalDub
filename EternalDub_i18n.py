@@ -18,7 +18,7 @@ register it in TRADUCOES and IDIOMAS. Translation contributions are welcome!
 import locale
 import os
 
-VERSAO_IDIOMAS = "1.0"
+VERSAO_IDIOMAS = "1.1"
 
 IDIOMAS = (("pt", "Português (Brasil)"), ("en", "English"))
 _atual = "pt"
@@ -134,7 +134,7 @@ EN = {
     "Principal": "Main",
     "Motor de montagem": "Muxing engine",
     "FFmpeg (cópia sem recodificar)": "FFmpeg (copy without re-encoding)",
-    "mkvmerge (cópia sem recodificar - recomendado)": "mkvmerge (copy without re-encoding - recommended)",
+    "mkvmerge (cópia sem recodificar)": "mkvmerge (copy without re-encoding)",
     "mkvmerge (não encontrado)": "mkvmerge (not found)",
     "Abrir filme...": "Open movie...",
     "Escolha o filme de alta qualidade (.mkv)": "Choose the high-quality movie (.mkv)",
@@ -154,7 +154,7 @@ EN = {
     "Compara os cortes de cena dos vídeos": "Compares the scene cuts of both videos",
     "Detectar lendo os arquivos inteiros (lento)...": "Detect by reading the whole files (slow)...",
     "Para quando a análise rápida não acha a dublagem": "For when the quick analysis can't find the dub",
-    "Zerar atraso e velocidade": "Reset delay and speed",
+    "Zerar atraso, velocidade e trechos": "Reset delay, speed and sections",
     "Gerar teste (5 min)": "Make test (5 min)",
     "Gera só os 5 primeiros minutos para conferir a sincronia": "Makes only the first 5 minutes, to check the sync",
     "Gerar arquivo final": "Make final file",
@@ -219,10 +219,6 @@ EN = {
     "ATENÇÃO: FFmpeg não encontrado. Instale o FFmpeg ou use Opções > Localizar FFmpeg.":
         "WARNING: FFmpeg not found. Install FFmpeg or use Options > Locate FFmpeg.",
     "Montagem: %s | %s": "Muxing: %s | %s",
-    "mkvmerge não encontrado: a montagem usa o FFmpeg. Instalar o MKVToolNix (só o programa; a janela dele não "
-    "precisa ser usada) deixa o EternalDub usar o mkvmerge, que é o recomendado.":
-        "mkvmerge not found: muxing will use FFmpeg. Installing MKVToolNix (just the program; you don't need to use "
-        "its window) lets EternalDub use mkvmerge, which is recommended.",
     "Abrir filme": "Open movie",
     "Vídeos (*.mkv *.mp4 *.m2ts *.ts *.avi *.mov);;Todos os arquivos (*)":
         "Videos (*.mkv *.mp4 *.m2ts *.ts *.avi *.mov);;All files (*)",
@@ -302,10 +298,6 @@ EN = {
         "The versions have different CUTS: the delay changes along the movie (movie times).",
     "As versões têm CORTES diferentes: o atraso muda ao longo do filme.":
         "The versions have different CUTS: the delay changes along the movie.",
-    "Um único atraso não serve para o filme inteiro (juntar trechos ainda não existe nesta versão).\n"
-    "Usar o atraso do primeiro trecho (%+d ms)?":
-        "A single delay won't work for the whole movie (joining sections is not available in this version yet).\n"
-        "Use the delay of the first section (%+d ms)?",
     "CORTES diferentes - ver registro": "different CUTS - see the log",
     "Trechos com atrasos diferentes: %s": "Sections with different delays: %s",
 
@@ -383,14 +375,13 @@ EN = {
         "1) Open the movie  2) add the dubs  3) <i>Detect delay</i> (or drag the orange track in the waveform)  "
         "4) <i>Make test</i> and check it  5) <i>Make final file</i>.",
     "Se a dublagem tiver velocidade diferente (ex.: PAL), o programa avisa e corrige só a dublagem. Se as versões "
-    "tiverem cortes diferentes, ele mostra os trechos.":
+    "tiverem cortes diferentes, ele sincroniza a dublagem trecho por trecho.":
         "If the dub has a different speed (e.g. PAL), the program warns you and corrects only the dub. If the "
-        "versions have different cuts, it shows the sections.",
+        "versions have different cuts, it syncs the dub section by section.",
     "Créditos": "Credits",
     "Criação, testes e direção do projeto: %s": "Creation, testing and project direction: %s",
     "Código escrito com auxílio de IA (Claude, da Anthropic).": "Code written with AI assistance (Claude, by Anthropic).",
-    "Usa: FFmpeg, MKVToolNix (mkvmerge), Qt for Python (PySide6) e NumPy.":
-        "Uses: FFmpeg, MKVToolNix (mkvmerge), Qt for Python (PySide6) and NumPy.",
+    "Usa: FFmpeg, Qt for Python (PySide6) e NumPy.": "Uses: FFmpeg, Qt for Python (PySide6) and NumPy.",
     "Colaboradores: veja CREDITS.md e a página do projeto.": "Contributors: see CREDITS.md and the project page.",
     "Software livre e de código aberto (licença %s).": "Free and open-source software (%s license).",
     "Há uma tarefa em andamento. Cancelar e sair?": "A task is running. Cancel it and exit?",
@@ -426,8 +417,8 @@ EN = {
     "Arquivo da dublagem não encontrado:\n%s": "Dub file not found:\n%s",
     "A mesma faixa foi adicionada duas vezes: %s (faixa %d)": "The same track was added twice: %s (track %d)",
     "Só uma dublagem pode ser a faixa padrão.": "Only one dub can be the default track.",
-    "Dublagem %d: corrigindo a velocidade (só esta dublagem vira FLAC)...":
-        "Dub %d: correcting the speed (only this dub becomes FLAC)...",
+    "Dublagem %d: corrigindo a velocidade (só esta dublagem vira FLAC, sem perdas)...":
+        "Dub %d: correcting the speed (only this dub becomes FLAC, lossless)...",
     "Mantenha pelo menos uma faixa de vídeo do filme.": "Keep at least one video track from the movie.",
     "Dublagem %d: cortando o começo da dublagem (cópia exata, sem recodificar)...":
         "Dub %d: trimming the start of the dub (exact copy, no re-encoding)...",
@@ -502,10 +493,10 @@ EN = {
     "tempo do filme": "movie time",
     "tempo da dublagem": "dub time",
     "   por volta de %s até %s (%s): atraso %s": "   around %s to %s (%s): delay %s",
-    "Um único atraso não serve para o filme inteiro. A ferramenta ainda não junta os pedaços sozinha; por "
-    "enquanto, o atraso do primeiro trecho é: %s":
-        "A single delay won't work for the whole movie. The tool doesn't join the sections by itself yet; for "
-        "now, the delay of the first section is: %s",
+    "Um único atraso não serve para o filme inteiro. Use --mapa para medir o atraso trecho por trecho (no "
+    "EternalDub: Sincronização > Sincronizar trecho por trecho). Atraso do trecho mais longo: %s":
+        "A single delay won't work for the whole movie. Use --mapa to measure the delay section by section (in "
+        "EternalDub: Sync > Sync section by section). Delay of the longest section: %s",
     "Não encontrei uma correspondência confiável entre os dois arquivos.":
         "Could not find a reliable match between the two files.",
     "Melhor palpite (NÃO confie): %s": "Best guess (do NOT trust it): %s",
@@ -539,6 +530,95 @@ EN = {
     "ERRO: %s": "ERROR: %s",
     "DUBLAGEM": "DUB",
     "DUBLAGEM_corrigida.flac": "DUB_corrected.flac",
+    # ---- 1.1: sincronia por trechos
+    "Mapa por trechos: %d trechos, %d emendas (concorda com %.0f%% dos pontos medidos com segurança).":
+        "Section map: %d sections, %d splices (agrees with %.0f%% of the reliably measured points).",
+    "   %s a %s: atraso %s": "   %s to %s: delay %s",
+    "   emenda em %s: %d ms de silêncio (a dublagem não tem esse pedaço)":
+        "   splice at %s: %d ms of silence (the dub doesn't have this piece)",
+    "   emenda em %s: saem %d ms da dublagem (pedaço que não existe no filme)":
+        "   splice at %s: %d ms of the dub removed (a piece that doesn't exist in the movie)",
+    "depois de medir, lê as duas faixas inteiras e mostra o mapa de sincronia por trechos (para versões com cortes "
+    "diferentes)":
+        "after measuring, reads both whole tracks and shows the section-by-section sync map (for versions with "
+        "different cuts)",
+    "Mapa por trechos: lendo as duas faixas inteiras...": "Section map: reading both whole tracks...",
+    "ATENÇÃO: o áudio ficou gravado até %.0f s longe do vídeo dentro do arquivo (alguns players ficam mudos nesses "
+    "pontos)":
+        "WARNING: the audio was written up to %.0f s away from the video inside the file (some players go silent at "
+        "those points)",
+    "áudio bem entrelaçado com o vídeo": "audio well interleaved with the video",
+    "   ajuste fino da velocidade: x%.5f -> x%.5f (%+.2f s por hora)":
+        "   fine speed adjustment: x%.5f -> x%.5f (%+.2f s per hour)",
+    "Velocidade usada no mapa: x%.5f (atempo=%.6f)": "Speed used in the map: x%.5f (atempo=%.6f)",
+    "Sincronia por trechos: lendo as duas faixas inteiras (o que já está no cache é instantâneo; um UHD num HD pode "
+    "levar vários minutos)...":
+        "Section sync: reading both whole tracks (whatever is already cached is instant; a UHD file on a hard "
+        "drive can take several minutes)...",
+    "Medindo o atraso a cada segundo do filme...": "Measuring the delay at every second of the movie...",
+    "Não encontrei uma correspondência confiável entre a dublagem e o filme.":
+        "Could not find a reliable match between the dub and the movie.",
+    "O mapa por trechos não encontrou nenhum pedaço da dublagem dentro do filme.":
+        "The section map didn't find any piece of the dub inside the movie.",
+    "Não consegui ler a faixa de áudio %d de:\n%s": "Could not read audio track %d of:\n%s",
+    "O FFmpeg não entregou o áudio da dublagem.": "FFmpeg didn't deliver the dub's audio.",
+    "Nenhum pedaço da dublagem cai dentro do filme.": "No piece of the dub falls inside the movie.",
+    "O FFmpeg falhou ao gravar o FLAC da dublagem:\n%s": "FFmpeg failed to write the dub's FLAC:\n%s",
+    "O FFmpeg falhou ao montar a dublagem:\n%s\n%s": "FFmpeg failed to assemble the dub:\n%s\n%s",
+    "Dublagem %d: montando trecho por trecho (%d trechos; só esta dublagem vira FLAC, sem perdas)...":
+        "Dub %d: assembling section by section (%d sections; only this dub becomes FLAC, lossless)...",
+    "%s   (sincronia por trechos: %d trechos, ajuste %+d ms)": "%s   (section sync: %d sections, adjustment %+d ms)",
+    "Sincronizar trecho por trecho...": "Sync section by section...",
+    "Sincronizar trecho por trecho": "Sync section by section",
+    "Para versões com cortes diferentes: mede o atraso a cada segundo e monta a dublagem pedaço por pedaço":
+        "For versions with different cuts: measures the delay at every second and assembles the dub piece by piece",
+    "%d trechos": "%d sections",
+    "sincronia por trechos: %d trechos (o Atraso acima é um ajuste fino somado a todos; só esta dublagem vira FLAC)":
+        "section sync: %d sections (the Delay above is a fine adjustment added to all of them; only this dub "
+        "becomes FLAC)",
+    "Um único atraso deixa parte das falas fora do lugar.\n\nSincronizar trecho por trecho (recomendado): o "
+    "EternalDub mede o atraso a cada segundo e monta a dublagem pedaço por pedaço. Onde a dublagem não tem um "
+    "pedaço do filme entra silêncio; onde ela tem algo que não existe no filme, esse pedaço sai (de preferência "
+    "numa pausa). Só a dublagem vira FLAC (sem perdas); o filme não é tocado.":
+        "A single delay leaves part of the lines out of place.\n\nSync section by section (recommended): EternalDub "
+        "measures the delay at every second and assembles the dub piece by piece. Where the dub is missing a piece "
+        "of the movie, silence goes in; where it has something that doesn't exist in the movie, that piece is "
+        "removed (preferably in a pause). Only the dub becomes FLAC (lossless); the movie is not touched.",
+    "Usar um atraso só (%+d ms)": "Use a single delay (%+d ms)",
+    "Cancelar": "Cancel",
+    "Medir trecho por trecho usando qual faixa deste arquivo?\n(a própria dublagem funciona; uma faixa no idioma "
+    "original da mesma fonte costuma ser ainda melhor, e aí o resultado vale para TODAS as dublagens deste arquivo)":
+        "Measure section by section using which track of this file?\n(the dub itself works; a track in the original "
+        "language from the same source is usually even better, and then the result applies to ALL dubs from this "
+        "file)",
+    "A sincronia por trechos precisa do áudio INTEIRO do filme (%.0f GB) e da dublagem. A onda do filme ainda não "
+    "foi lida por completo, então o filme será lido agora (num HD pode levar vários minutos; fica guardado para as "
+    "próximas vezes). Continuar?":
+        "Section sync needs the ENTIRE audio of the movie (%.0f GB) and of the dub. The movie's waveform hasn't been "
+        "fully read yet, so the movie will be read now (on a hard drive this can take several minutes; it is kept "
+        "for next time). Continue?",
+    "Sincronizando trecho por trecho": "Syncing section by section",
+    "Sincronia por trechos: %d trechos, %d emendas; o mapa concorda com %.0f%% dos pontos medidos com segurança.":
+        "Section sync: %d sections, %d splices; the map agrees with %.0f%% of the reliably measured points.",
+    "   %s a %s: atraso %+d ms": "   %s to %s: delay %+d ms",
+    "Trechos: %d   (emendas: %d)": "Sections: %d   (splices: %d)",
+    "Concorda com %.0f%% dos pontos medidos com segurança": "Agrees with %.0f%% of the reliably measured points",
+    "Silêncio inserido no total: %.1f s": "Total silence inserted: %.1f s",
+    "Dublagem removida no total: %.1f s": "Total dub removed: %.1f s",
+    "Começo da dublagem que fica antes do filme (não entra): %.1f s":
+        "Start of the dub that falls before the movie (left out): %.1f s",
+    "Fim da dublagem que passa do filme (não entra): %.1f s":
+        "End of the dub that goes past the movie (left out): %.1f s",
+    "um atraso só serve (%+d ms)": "a single delay works (%+d ms)",
+    "O mapa achou um único trecho: um atraso só (%+d ms) serve para o filme inteiro.":
+        "The map found a single section: one delay (%+d ms) works for the whole movie.",
+    "sincronia por trechos: %d trechos": "section sync: %d sections",
+    "Sincronia por trechos pronta.\n\n%s\n\nA onda mostra a dublagem já no lugar (as emendas ficam marcadas em "
+    "vermelho). A lista completa das emendas está no Registro.\n\nConfira com Gerar teste (5 min) e, no arquivo "
+    "final, ouça alguns pontos das emendas.":
+        "Section sync ready.\n\n%s\n\nThe waveform shows the dub already in place (splices are marked in red). The "
+        "full list of splices is in the Log.\n\nCheck it with Make test (5 min) and, in the final file, listen to "
+        "a few of the splice points.",
 }
 
 TRADUCOES = {"en": EN}

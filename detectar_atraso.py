@@ -18,6 +18,9 @@ Como funciona (so precisa de Python 3, numpy e FFmpeg):
          sincronizada com o video dela, o atraso do video e o atraso da dublagem.
   Alem do atraso, testa varias partes do filme para avisar se ha diferenca de
   VELOCIDADE (ex.: PAL 25 fps vs 23,976 fps) ou CORTES diferentes entre as versoes.
+  MAPA POR TRECHOS (--mapa): quando o atraso muda ao longo do filme (cortes diferentes, ou
+  uma dublagem remontada por quem a publicou), mede o atraso a cada segundo e diz onde ele
+  muda, para a dublagem ser montada trecho por trecho.
 
 Rapidez (modo padrao): num remux UHD, quase todos os bytes do arquivo sao VIDEO. Para
 pegar o audio de um trecho, o FFmpeg tem de ler o video daquele trecho tambem. Por isso o
@@ -49,7 +52,7 @@ except ImportError:                      # o detector tambem funciona sozinho, e
     rot_conf = rot_metodo = tr
     _definir_idioma = _idioma_sistema = None
 
-VERSAO_DETECTOR = "1.0"     # tem de ser igual a do EternalDub_core.py
+VERSAO_DETECTOR = "1.1"     # tem de ser igual a do EternalDub_core.py
 
 # ----------------------------------------------------------------- configuracao
 SR_AUDIO = 8000            # taxa de amostragem usada na analise de audio
@@ -448,7 +451,8 @@ def interpretar(janelas, escolhido, tol_s):
     res["grupos"] = [{"ini": g["ini"] - 30, "fim": g["fim"] + 30, "atraso": float(np.median(g["y"]))}
                      for g in grandes]
     res["status"] = "CORTES"
-    res["atraso"] = float(np.median(grandes[0]["y"])) if grandes else med
+    # um atraso so (quando o usuario nao quer o mapa por trechos): o do trecho mais longo
+    res["atraso"] = float(np.median(max(grandes, key=lambda g: len(g["y"]))["y"])) if grandes else med
     return res
 
 
@@ -472,6 +476,332 @@ def _confianca(res):
     if res["z_mediano"] >= 10 and res["n_boas"] >= 0.7 * res["n_total"]:
         return "ALTA"
     return "MEDIA"
+
+
+# ----------------------------------------------------------------- MAPA de sincronia POR TRECHOS
+# Quando as versoes tem cortes diferentes (ou a dublagem foi remontada por quem a publicou), o atraso
+# MUDA ao longo do filme e um atraso unico deixa boa parte das falas fora do lugar. O mapa:
+#   1) mede o atraso a cada MAPA_PASSO s, em janelas de MAPA_JANELA s, numa faixa de +-alcance em
+#      torno do atraso principal (correlacao das mesmas caracteristicas usadas na deteccao);
+#   2) escolhe o caminho mais provavel (Viterbi): o atraso so muda quando a evidencia compensa o
+#      custo da mudanca, entao trechos sem musica/efeitos (so dialogo) nao criam cortes falsos;
+#   3) acha o PONTO de cada mudanca comparando, quadro a quadro (20 ms), qual dos dois atrasos
+#      combina melhor, e entre os pontos quase empatados escolhe uma PAUSA da dublagem;
+#   4) devolve os PEDACOS: [ini_filme, fim_filme, ini_dublagem] (s). Onde a dublagem nao tem um
+#      pedaco do filme, fica silencio; onde ela tem material que nao existe no filme, ele sai.
+# Tudo aqui so MEDE (audio leve, 8 kHz). A montagem com o audio original fica no EternalDub_core.py.
+MAPA_JANELA = 6.0        # s por janela de medicao
+MAPA_PASSO = 1.0         # s entre janelas
+MAPA_ALCANCE = 20.0      # s: quanto o atraso pode variar em torno do principal (aumenta se precisar)
+MAPA_PISO = 2.0          # pontuacao abaixo disso nao conta como evidencia
+MAPA_CUSTO_PERTO = 12.0  # custo (em pontuacao) para mudar o atraso em ate MAPA_PERTO_S
+MAPA_CUSTO_LONGE = 30.0  # custo para um salto maior
+MAPA_PERTO_S = 3.0
+MAPA_JUNTAR_S = 0.08     # mudancas menores que 80 ms sao ignoradas (cada emenda tem um custo)
+MAPA_TOLERANCIA = 10.0   # pontos de emenda "quase empatados" (soma de semelhanca quadro a quadro)
+MAPA_RAIO_PAUSA = 3.0    # s: ate onde procurar uma pausa da dublagem em volta do melhor ponto
+MAPA_Z_BOM = 5.0         # janela "boa" (confiavel) para um atraso
+MAPA_Z_FRACO = 3.0       # trecho sem janela boa so muda o atraso se a pontuacao mediana chegar a isto
+
+
+def _max_vizinhos(x, k):
+    """Maximo de x[i-k .. i+k] para cada i (algoritmo de van Herk / Gil-Werman, tempo linear)."""
+    m, w = len(x), 2 * k + 1
+    tot = m + 2 * k
+    tot += (-tot) % w
+    pad = np.full(tot, -np.inf)
+    pad[k:k + m] = x
+    bl = pad.reshape(-1, w)
+    g = np.maximum.accumulate(bl, axis=1).ravel()
+    h = np.maximum.accumulate(bl[:, ::-1], axis=1)[:, ::-1].ravel()
+    return np.maximum(h[:m], g[w - 1:w - 1 + m])
+
+
+def _viterbi_atrasos(E, custo_perto, custo_longe, k_perto, cancelar=None):
+    """
+    Caminho de maior pontuacao por E (janelas x atrasos): ficar no mesmo atraso nao custa nada;
+    mudar ate k_perto colunas custa custo_perto; um salto maior custa custo_longe.
+    """
+    n, m = E.shape
+    V = E[0].astype(np.float64)
+    Vs = np.empty((n, m), np.float32)
+    Vs[0] = V
+    esc = np.zeros((n, m), np.uint8)              # 0 ficou, 1 veio de perto, 2 veio de longe
+    for i in range(1, n):
+        if cancelar is not None and i % 500 == 0 and cancelar.is_set():
+            raise Cancelado()
+        perto = _max_vizinhos(V, k_perto) - custo_perto
+        longe = V.max() - custo_longe
+        melhor = V.copy()
+        e = np.zeros(m, np.uint8)
+        mk = perto > melhor
+        melhor[mk] = perto[mk]
+        e[mk] = 1
+        mk = longe > melhor
+        melhor[mk] = longe
+        e[mk] = 2
+        V = melhor + E[i]
+        Vs[i] = V
+        esc[i] = e
+    p = np.empty(n, np.int64)
+    p[-1] = int(np.argmax(V))
+    for i in range(n - 1, 0, -1):
+        l, e = p[i], esc[i, p[i]]
+        if e == 0:
+            p[i - 1] = l
+        elif e == 1:
+            lo, hi = max(0, l - k_perto), min(m, l + k_perto + 1)
+            p[i - 1] = lo + int(np.argmax(Vs[i - 1, lo:hi]))
+        else:
+            p[i - 1] = int(np.argmax(Vs[i - 1]))
+    return p
+
+
+def _pico_perto(c, q, raio=2):
+    """Posicao (fracionaria) do pico de c perto da coluna q."""
+    lo, hi = max(q - raio, 1), min(q + raio + 1, len(c) - 1)
+    if hi <= lo:
+        return float(q)
+    k = lo + int(np.argmax(c[lo:hi]))
+    y0, y1, y2 = float(c[k - 1]), float(c[k]), float(c[k + 1])
+    den = y0 - 2 * y1 + y2
+    return k + (max(-1.0, min(1.0, 0.5 * (y0 - y2) / den)) if den != 0 else 0.0)
+
+
+def curvas_mapa(a, b, taxa, centro_s, janela_s=MAPA_JANELA, passo_s=MAPA_PASSO, alcance_s=MAPA_ALCANCE,
+                cancelar=None, prog=None):
+    """
+    Pontuacao z de cada atraso (centro_s +- alcance_s) em cada janela do filme.
+    Devolve (tempos_centro_das_janelas, Z [janelas x atrasos], q0) com atraso da coluna q = (q0 + q) / taxa.
+    Convencao: tempo_filme = tempo_dub + atraso  (b ja esta na velocidade do filme).
+    """
+    w, h, lq = int(janela_s * taxa), max(1, int(passo_s * taxa)), int(alcance_s * taxa)
+    c0 = int(round(centro_s * taxa))
+    ini = np.arange(0, max(1, a.shape[1] - w + 1), h)
+    Z = np.zeros((len(ini), 2 * lq + 1), np.float32)
+    nfft = prox_pot2(2 * w + 2 * lq)
+    for k, i0 in enumerate(ini):
+        if k % 200 == 0:
+            if cancelar is not None and cancelar.is_set():
+                raise Cancelado()
+            if prog:
+                prog(k / len(ini))
+        d_ini = i0 - c0 - lq
+        a0, a1 = max(d_ini, 0), min(d_ini + w + 2 * lq, b.shape[1])
+        if a1 - a0 < w or i0 + w > a.shape[1]:
+            continue
+        seg = np.zeros((b.shape[0], w + 2 * lq), np.float32)
+        seg[:, a0 - d_ini:a1 - d_ini] = b[:, a0:a1]
+        S = np.fft.rfft(seg, nfft, axis=1) * np.conj(np.fft.rfft(a[:, i0:i0 + w], nfft, axis=1))
+        c = np.fft.irfft(S.sum(axis=0), nfft)[:2 * lq + 1][::-1]
+        dp = c.std()
+        if dp > 0:
+            Z[k] = (c - c.mean()) / dp
+    return (ini + w / 2.0) / taxa, Z, c0 - lq
+
+
+def mapa_trechos(a, b, taxa, centro_s, energia_dub=None, taxa_energia=100.0, dur_filme=None, dur_dub=None,
+                 alcance_s=MAPA_ALCANCE, msg=None, prog=None, cancelar=None):
+    """
+    Mapa de sincronia por trechos.
+      a: caracteristicas do filme;  b: da dublagem JA na velocidade do filme (reamostrar);
+      centro_s: atraso principal (da deteccao);  energia_dub: RMS da dublagem a cada 1/taxa_energia s
+      (na mesma linha do tempo de b), usada para preferir pausas nas emendas.
+    Devolve dict:
+      trechos: [{ini, fim, atraso, boas, z}]  (tempo do filme, s)
+      cortes:  [{t, delta, lo, hi}]  delta > 0: silencio de delta s no filme;  delta < 0: sai |delta| s da dublagem
+      pedacos: [[ini_filme, fim_filme, ini_dub], ...]  (ini_dub no tempo de b)
+      concordancia: % das janelas confiaveis em que o mapa concorda com a melhor medicao (+-45 ms)
+    """
+    msg = msg or (lambda m: None)
+    prog = prog or (lambda f: None)
+    tempos, Z, q0 = curvas_mapa(a, b, taxa, centro_s, alcance_s=alcance_s, cancelar=cancelar,
+                                prog=lambda f: prog(0.75 * f))
+    if len(tempos) < 2:
+        raise RuntimeError(tr("áudio curto demais para analisar"))
+    E = np.clip(Z - MAPA_PISO, 0, 13).astype(np.float32)
+    caminho = _viterbi_atrasos(E, MAPA_CUSTO_PERTO, MAPA_CUSTO_LONGE, int(MAPA_PERTO_S * taxa), cancelar)
+    prog(0.85)
+    # trechos com atraso constante (atraso refinado pela soma das curvas das janelas boas)
+    trechos = []
+    k = 0
+    while k < len(caminho):
+        j = k
+        while j + 1 < len(caminho) and caminho[j + 1] == caminho[k]:
+            j += 1
+        q = int(caminho[k])
+        boas = [i for i in range(k, j + 1) if Z[i, q] >= MAPA_Z_BOM]
+        soma = Z[boas].sum(0) if boas else Z[k:j + 1].sum(0)
+        trechos.append({"i0": k, "i1": j, "atraso": (q0 + _pico_perto(soma, q, 5)) / taxa, "boas": boas,
+                        "z": float(np.median(Z[k:j + 1, q]))})
+        k = j + 1
+    # trecho sem NENHUMA janela confiavel e com evidencia fraca (pontuacao mediana < MAPA_Z_FRACO) nao
+    # muda o atraso: costuma ser engano (conferido pelo video num caso real). Fica com o atraso do
+    # vizinho que combina melhor.
+    if any(t["boas"] for t in trechos):
+        for i, t in enumerate(trechos):
+            if t["boas"] or t["z"] >= MAPA_Z_FRACO:
+                continue
+            viz = [trechos[j] for j in (i - 1, i + 1) if 0 <= j < len(trechos) and trechos[j]["boas"]]
+            if not viz and i > 0:
+                viz = [trechos[i - 1]]
+            if viz:
+                def apoio(v):
+                    q = int(round(v["atraso"] * taxa)) - q0
+                    return float(Z[t["i0"]:t["i1"] + 1, min(max(q, 0), Z.shape[1] - 1)].sum())
+                t["atraso"] = max(viz, key=apoio)["atraso"]
+    juntos = []
+    for t in trechos:                    # mudancas pequenas demais: junta
+        if juntos and abs(t["atraso"] - juntos[-1]["atraso"]) < MAPA_JUNTAR_S:
+            u = juntos[-1]
+            na, nb = max(1, len(u["boas"])), max(1, len(t["boas"]))
+            u["atraso"] = (u["atraso"] * na + t["atraso"] * nb) / (na + nb)
+            u["i1"], u["boas"] = t["i1"], u["boas"] + t["boas"]
+            u["z"] = max(u["z"], t["z"])
+        else:
+            juntos.append(dict(t))
+    trechos = juntos
+    # velocidade fina: dentro de cada trecho o atraso deveria ser constante. Uma inclinacao comum a todos
+    # os trechos (ex.: 25/24 escolhido no lugar de 25/23,976, 0,1%) e medida aqui para o chamador corrigir.
+    sxy = sxx = 0.0
+    pontos = []
+    for t in trechos:
+        q = int(round(t["atraso"] * taxa)) - q0
+        if not (0 <= q < Z.shape[1]):
+            continue
+        ii = [i for i in range(t["i0"], t["i1"] + 1) if Z[i, q] >= MAPA_Z_BOM]
+        if len(ii) < 3:
+            continue
+        tt = tempos[ii]
+        yy = np.array([(q0 + _pico_perto(Z[i], q, 3)) / taxa for i in ii])
+        tt, yy = tt - tt.mean(), yy - yy.mean()
+        sxy += float((tt * yy).sum())
+        sxx += float((tt * tt).sum())
+        pontos.append((tt, yy))
+    deriva, deriva_ep = 0.0, 1.0
+    if sxx > 0:
+        deriva = sxy / sxx
+        resid = np.concatenate([yy - deriva * tt for tt, yy in pontos])
+        n_ef = max(1.0, len(resid) / (MAPA_JANELA / MAPA_PASSO))       # janelas vizinhas se sobrepoem
+        deriva_ep = float(np.sqrt(np.mean(resid ** 2) / sxx * len(resid) / n_ef))
+    pontuacao = float(E[np.arange(len(caminho)), caminho].sum())
+    # ponto exato de cada mudanca
+    nbandas = a.shape[0]
+    cortes = []
+    t_min = 0.0
+    for k in range(len(trechos) - 1):
+        A, B = trechos[k], trechos[k + 1]
+        lo = tempos[A["boas"][-1]] if A["boas"] else tempos[A["i0"]]
+        hi = tempos[B["boas"][0]] if B["boas"] else tempos[B["i1"]]
+        lo, hi = lo - MAPA_JANELA / 4, hi + MAPA_JANELA / 4
+        lo = max(lo, t_min)
+        if hi <= lo + 0.1:
+            lo, hi = lo - 0.5, lo + 0.6
+        u = np.arange(max(0, int(lo * taxa)), max(1, min(a.shape[1], int(hi * taxa))))
+
+        def semelhanca(atraso):
+            jb = u - int(round(atraso * taxa))
+            ok = (jb >= 0) & (jb < b.shape[1])
+            s_ = np.zeros(len(u), np.float32)
+            s_[ok] = (a[:, u[ok]] * b[:, jb[ok]]).sum(0) / nbandas
+            return s_
+        D = np.concatenate([[0.0], np.cumsum(semelhanca(A["atraso"]) - semelhanca(B["atraso"]))])
+        tc = np.concatenate([u, [u[-1] + 1]]) / taxa                 # D[i]: emenda logo antes de tc[i]
+        melhor = float(D.max())
+        t_esc = float(tc[int(np.argmax(D))])
+        delta = B["atraso"] - A["atraso"]
+        quase = (D >= melhor - MAPA_TOLERANCIA) & (np.abs(tc - t_esc) <= MAPA_RAIO_PAUSA)
+        if energia_dub is not None and len(energia_dub) and quase.sum() > 1:
+            cands = tc[quase]
+            custos = np.empty(len(cands))
+            for i, t in enumerate(cands):
+                x = t - A["atraso"]                                    # ponto da dublagem na emenda
+                x0, x1 = (x - 0.08, x + 0.08) if delta > 0 else (x - 0.05, x - delta + 0.05)
+                e0, e1 = int(max(0.0, x0) * taxa_energia), int(max(0.0, x1) * taxa_energia) + 1
+                custos[i] = float(np.mean(energia_dub[e0:e1])) if e0 < min(e1, len(energia_dub)) else 1.0
+            ordem = np.lexsort((np.abs(cands - t_esc), np.round(custos / (custos.min() + 1e-6), 1)))
+            t_esc = float(cands[ordem[0]])
+        t_esc = max(t_esc, t_min)
+        cortes.append({"t": t_esc, "delta": float(delta), "lo": float(lo), "hi": float(hi)})
+        t_min = t_esc + max(0.0, delta) + 0.05
+    # pedacos [ini_filme, fim_filme, ini_dub]
+    d_fim = float(dur_dub) if dur_dub else b.shape[1] / taxa
+    f_fim = float(dur_filme) if dur_filme else a.shape[1] / taxa
+    pedacos = []
+    for k, t in enumerate(trechos):
+        d = t["atraso"]
+        fi = max(0.0, d) if k == 0 else cortes[k - 1]["t"] + max(0.0, cortes[k - 1]["delta"])
+        ff = cortes[k]["t"] if k < len(cortes) else min(f_fim, d_fim + d)
+        if pedacos:                                  # a dublagem so anda para a frente
+            fim_ant = pedacos[-1][2] + (pedacos[-1][1] - pedacos[-1][0])
+            if fi - d < fim_ant:
+                fi = fim_ant + d
+        fi = max(fi, d, 0.0)                         # nada antes do comeco do filme nem da dublagem
+        ff = min(ff, d_fim + d, f_fim)
+        if ff - fi > 0.02:
+            pedacos.append([float(fi), float(ff), float(fi - d)])
+    # concordancia com as janelas confiaveis
+    melhor_q = Z.argmax(1)
+    conf = Z.max(1) >= 7.0
+    atr_mapa = np.full(len(tempos), np.nan)
+    for fi, ff, di in pedacos:
+        dentro = (tempos >= fi) & (tempos < ff)
+        atr_mapa[dentro] = fi - di
+    ok = np.abs(atr_mapa - (q0 + melhor_q) / taxa) <= 0.045
+    concord = float(100.0 * (ok & conf).sum() / conf.sum()) if conf.sum() else 0.0
+    prog(1.0)
+    for t in trechos:
+        t["ini"], t["fim"] = float(tempos[t["i0"]] - MAPA_JANELA / 2), float(tempos[t["i1"]] + MAPA_JANELA / 2)
+        t["boas"] = len(t["boas"])
+        del t["i0"], t["i1"]
+    return {"trechos": trechos, "cortes": cortes, "pedacos": pedacos, "concordancia": concord,
+            "janelas_confiaveis": int(conf.sum()), "janelas": int(len(tempos)), "deriva": float(deriva),
+            "deriva_ep": float(deriva_ep), "pontuacao": pontuacao}
+
+
+def mapa_com_velocidade(a, b, taxa, r, centro_s, energia=None, taxa_energia=100.0, dur_filme=None, dur_dub=None,
+                        alcance_s=MAPA_ALCANCE, msg=None, prog=None, cancelar=None, voltas=2):
+    """
+    mapa_trechos() com a dublagem esticada pela velocidade r (tempo_filme = r * tempo_dub + atraso) e,
+    se os trechos mostrarem uma inclinacao comum (velocidade quase certa, mas nao exata), refaz o mapa
+    com a velocidade corrigida, ate `voltas` vezes, enquanto a pontuacao total melhorar.
+    b, energia e dur_dub no tempo ORIGINAL da dublagem. Devolve (mapa, r_final); pedacos no tempo esticado.
+    """
+    msg = msg or (lambda m: None)
+
+    def rodar(r_):
+        e = energia
+        if e is not None and abs(r_ - 1.0) > 1e-9:
+            e = np.interp(np.arange(int(len(e) * r_)) / r_, np.arange(len(e)), e).astype(np.float32)
+        return mapa_trechos(a, reamostrar(b, r_), taxa, centro_s, energia_dub=e, taxa_energia=taxa_energia,
+                            dur_filme=dur_filme, dur_dub=(dur_dub or b.shape[1] / taxa) * r_, alcance_s=alcance_s,
+                            msg=msg, prog=prog, cancelar=cancelar)
+    m = rodar(r)
+    for _ in range(voltas):
+        s_ = m["deriva"]
+        if abs(s_) < 2e-5 or abs(s_) < 4 * m["deriva_ep"]:
+            break
+        r_novo = r / (1.0 - s_)
+        m2 = rodar(r_novo)
+        if m2["pontuacao"] <= m["pontuacao"]:
+            break
+        msg(tr("   ajuste fino da velocidade: x%.5f -> x%.5f (%+.2f s por hora)") % (r, r_novo, 3600.0 * s_))
+        m, r = m2, r_novo
+    return m, r
+
+
+def relatorio_mapa(m, out, inicio_dub=0.0):
+    """Texto do mapa por trechos (linha de comando e registro do EternalDub)."""
+    p = lambda *a: print(*a, file=out)
+    p(tr("Mapa por trechos: %d trechos, %d emendas (concorda com %.0f%% dos pontos medidos com segurança).")
+      % (len(m["trechos"]), len(m["cortes"]), m["concordancia"]))
+    for t in m["trechos"]:
+        p(tr("   %s a %s: atraso %s") % (mmss(max(0.0, t["ini"])), mmss(t["fim"]), fmt_ms(t["atraso"])))
+    for c in m["cortes"]:
+        if c["delta"] > 0:
+            p(tr("   emenda em %s: %d ms de silêncio (a dublagem não tem esse pedaço)") % (mmss(c["t"]), round(c["delta"] * 1000)))
+        else:
+            p(tr("   emenda em %s: saem %d ms da dublagem (pedaço que não existe no filme)") % (mmss(c["t"]), round(-c["delta"] * 1000)))
 
 
 # ----------------------------------------------------------------- analise RAPIDA (le POUCO do filme)
@@ -529,7 +859,8 @@ def _interpretar_pontos(janelas, falhas, escolhido, tol_s):
         else:
             grupos.append({"ini": j["t"], "fim": j["t"], "y": [j["offset"]]})
     res["grupos"] = [{"ini": g["ini"] - 20, "fim": g["fim"] + 20, "atraso": float(np.median(g["y"]))} for g in grupos]
-    res.update(status="CORTES", atraso=res["grupos"][0]["atraso"])
+    maior = max(grupos, key=lambda g: (len(g["y"]), -g["ini"]))       # o trecho mais longo (empate: o primeiro)
+    res.update(status="CORTES", atraso=float(np.median(maior["y"])))
     return res
 
 
@@ -701,8 +1032,9 @@ def relatorio(res, out):
         for g in res["grupos"]:
             p(tr("   por volta de %s até %s (%s): atraso %s") %
               (mmss(g["ini"]), mmss(g["fim"]), ref, fmt_ms(g["atraso"])))
-        p(tr("Um único atraso não serve para o filme inteiro. A ferramenta ainda não junta os pedaços "
-             "sozinha; por enquanto, o atraso do primeiro trecho é: %s") % fmt_ms(res["atraso"]))
+        p(tr("Um único atraso não serve para o filme inteiro. Use --mapa para medir o atraso trecho por "
+             "trecho (no EternalDub: Sincronização > Sincronizar trecho por trecho). Atraso do trecho mais "
+             "longo: %s") % fmt_ms(res["atraso"]))
     else:
         p(tr("Não encontrei uma correspondência confiável entre os dois arquivos."))
         p(tr("Melhor palpite (NÃO confie): %s") % fmt_ms(res["atraso"]))
@@ -740,6 +1072,9 @@ def main():
     ap.add_argument("--tolerancia", type=float, default=80.0, help=tr("diferença aceita entre trechos (ms)"))
     ap.add_argument("--completo", action="store_true",
                     help=tr("lê os arquivos inteiros (lento em UHD); o padrão é a análise rápida por trechos"))
+    ap.add_argument("--mapa", action="store_true",
+                    help=tr("depois de medir, lê as duas faixas inteiras e mostra o mapa de sincronia por trechos "
+                            "(para versões com cortes diferentes)"))
     ap.add_argument("--simples", action="store_true",
                     help=tr("relatório vai para a tela de erro; só linhas CHAVE=valor no resultado"))
     ap.add_argument("--idioma", choices=["pt", "en"], help=tr("idioma das mensagens (padrão: o do sistema)"))
@@ -806,6 +1141,24 @@ def main():
 
     ordem = {"ALTA": 2, "MEDIA": 1, "BAIXA": 0}
     final = max(resultados, key=lambda r: (ordem[r["confianca"]], r["z_mediano"]))
+
+    if args.mapa and info_f["audios"] and len(info_d["audios"]) > args.faixa_dub:
+        ff = escolher_faixa_filme(info_f, args.faixa_filme)
+        print(tr("Mapa por trechos: lendo as duas faixas inteiras..."), file=out)
+        a = caracteristicas_audio(carregar_audio(args.filme, ff, info_f["audios"][ff].get("codec_name", "")))
+        pcm = carregar_pcm16(args.dublagem, args.faixa_dub, info_d["audios"][args.faixa_dub].get("codec_name", ""))
+        b = caracteristicas_audio(pcm.astype(np.float32) / 32768.0)
+        r = final["r"] * final["extra_r"]
+        n = len(pcm) // 80 * 80
+        en = np.sqrt(np.mean((pcm[:n].astype(np.float32) / 32768.0).reshape(-1, 80) ** 2, axis=1))
+        alcance = MAPA_ALCANCE
+        if final.get("grupos"):
+            alcance = min(60.0, max(alcance, max(abs(g["atraso"] - final["atraso"]) for g in final["grupos"]) + 5.0))
+        m, r = mapa_com_velocidade(a, b, TAXA_AUDIO, r, final["atraso"], energia=en, dur_filme=a.shape[1] / TAXA_AUDIO,
+                                   dur_dub=len(pcm) / SR_AUDIO, alcance_s=alcance, msg=lambda x: print(x, file=out))
+        if abs(r - 1.0) > 1e-9:
+            print(tr("Velocidade usada no mapa: x%.5f (atempo=%.6f)") % (r, 1.0 / r), file=out)
+        relatorio_mapa(m, out)
 
     # linhas para o .bat (sempre em ASCII)
     if args.simples:
