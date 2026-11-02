@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="EternalDub" width="128">
+</p>
+
 # EternalDub
 
 > Open-source tool to add dubbed audio tracks to high-quality video releases (**BDRemux, WEB-DL, BDRip**) **without re-encoding anything**. The video stays bit-for-bit identical; the dub is synchronized automatically.
