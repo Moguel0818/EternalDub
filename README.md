@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="EternalDub" width="128">
+  <img src="logo.png" alt="EternalDub" width="128">
 </p>
 
 # EternalDub
