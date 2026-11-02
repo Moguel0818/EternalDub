@@ -1,0 +1,76 @@
+# Gera o EternalDub.exe (sem precisar de Python) nos servidores do GitHub.
+#
+# Como usar (sem programar): na pagina do projeto, aba "Actions" > "Gerar EternalDub.exe" > "Run workflow".
+# Quando terminar (uns 5 minutos), baixe o arquivo em "Artifacts" no fim da pagina da execucao.
+# Tambem roda sozinho quando voce publica uma versao com uma tag "v..." (ex.: v1.3): o zip vai para a
+# pagina de Releases.
+#
+# How to use (no programming): on the project page, "Actions" tab > "Gerar EternalDub.exe" > "Run workflow".
+# When it finishes (about 5 minutes), download the file under "Artifacts" at the bottom of the run page.
+# It also runs by itself when you publish a version with a "v..." tag (e.g. v1.3): the zip goes to Releases.
+name: Gerar EternalDub.exe
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        modo: [pasta, arquivo]        # pasta: EternalDub\EternalDub.exe (rapido) | arquivo: um unico EternalDub.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar componentes
+        run: python -m pip install --upgrade pip pyinstaller -r requirements.txt
+
+      - name: Testes (os que nao precisam de FFmpeg)
+        run: python -m unittest tests.test_emendas tests.test_idiomas -v
+
+      - name: Gerar o programa
+        env:
+          ETERNALDUB_UM_ARQUIVO: ${{ matrix.modo == 'arquivo' && '1' || '0' }}
+        run: python -m PyInstaller EternalDub.spec --noconfirm --clean
+
+      - name: Autoteste do .exe (abre a janela, confere idiomas, emendas e Qt)
+        shell: pwsh
+        run: |
+          $exe = if ("${{ matrix.modo }}" -eq "arquivo") { "dist\EternalDub.exe" } else { "dist\EternalDub\EternalDub.exe" }
+          $p = Start-Process -FilePath $exe -ArgumentList "--autoteste", "$PWD\autoteste.txt" -Wait -PassThru
+          if (Test-Path autoteste.txt) { Get-Content autoteste.txt } else { Write-Host "O programa nao escreveu o resultado do autoteste." }
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Juntar os arquivos
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pacote | Out-Null
+          if ("${{ matrix.modo }}" -eq "arquivo") {
+            Copy-Item dist\EternalDub.exe pacote\
+            Copy-Item LICENSE, README.md, README.pt-BR.md, CREDITS.md, CHANGELOG.md pacote\
+            Compress-Archive -Path pacote\* -DestinationPath "EternalDub-Windows-um-arquivo.zip"
+          } else {
+            Copy-Item dist\EternalDub -Destination pacote\EternalDub -Recurse
+            Compress-Archive -Path pacote\EternalDub -DestinationPath "EternalDub-Windows-pasta.zip"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EternalDub-Windows-${{ matrix.modo }}
+          path: EternalDub-Windows-*.zip
+
+      - name: Publicar na pagina de Releases (so quando a execucao veio de uma tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: EternalDub-Windows-*.zip
