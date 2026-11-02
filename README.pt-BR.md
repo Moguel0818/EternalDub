@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="EternalDub" width="128">
+</p>
+
 # EternalDub
 
 > Ferramenta open-source para adicionar faixas de áudio dubladas a releases de vídeo de alta qualidade (**BDRemux, WEB-DL, BDRip**) **sem recodificar nada**. O vídeo fica idêntico bit a bit; a dublagem é sincronizada automaticamente.
