@@ -27,11 +27,15 @@ Brazilian dubbing (and dubbing culture worldwide) is a true treasure that deserv
 - **Speed differences.** It detects speed differences such as PAL (25 fps) against film (23.976 fps) and offers to correct them. Only the dub is converted (to lossless FLAC); the video is never touched.
 - **Different cuts, synced section by section.** When the versions have different cuts (or the dub was re-edited by whoever uploaded it), the delay changes along the movie. EternalDub measures it at every second, finds each change and assembles the dub piece by piece: where the dub is missing a piece of the movie, silence goes in; where it has something that doesn't exist in the movie, that piece is removed, preferably during a pause. Only the dub becomes FLAC (lossless); the movie is not touched.
 - **Waveform view** in the style of Subtitle Edit. Drag the dub to adjust the delay by hand, or use the ±10/100/1000 ms buttons.
+- **Edit the splices by hand.** In section-by-section sync, every splice is a red line on the waveform: drag it, nudge it with the arrow keys (10 ms; Shift 100 ms; Ctrl 1 ms), type its exact time or amount, add a splice anywhere (right-click) or remove a false one. Ctrl+drag slides only one section. A magnet snaps splices into the pauses of the dub, and the **Splices** tab tells you whether each one falls in a pause or in the middle of speech or music, so a line is never cut by accident. Everything has Undo/Redo.
+- **Listen inside the program.** Press **F8** to hear the dub exactly as it will end up in the file (delay, speed correction and splices applied), the movie's reference audio, or both mixed (if their music and effects match, the sync is right). Click the ruler to choose where to start; **F9** plays 3 seconds before and after the selected splice. No test file needed.
 - **Several dubs at once,** from one or many files, each with its own name, language and default flag.
-- **Track selection.** You choose which of the movie's own audio and subtitle tracks go into the final file.
+- **Organize the final file.** The **Final file** tab lists every track that can go into the MKV (the movie's own, the dubs and the added subtitles) in the order they will have: tick what goes in (**Check all** / **Uncheck all** buttons), change the order with **Up/Down** and pick the default audio and subtitle. With the interface in Portuguese it starts in the PT-BR BDRemux layout: 1) PT-BR audio, 2) the original-language audio, 3) PT-BR subtitles. It can also just reorganize a movie, with no dub at all.
+- **Add subtitles** like you add dubs: `.srt`, `.ass`, `.ssa`, `.vtt`, `.sup`, `.idx/.sub` or a subtitle track from another MKV/MP4, each with a name, language, delay and *forced* flag. Text subtitles in Windows-1252 or UTF-16 are converted to UTF-8 so accents come out right.
 - **Test and automatic check.** It makes a 5-minute test file first. After muxing, it checks that every dub has sound, is in sync and is well interleaved with the video inside the final file (audio written far away from its video makes some players go silent).
 - **All in one place.** Detection, manual adjustment, muxing and verification happen in a single window.
-- **Interface languages:** Portuguese (Brazil) and English.
+- **Interface languages:** Portuguese (Brazil), English, Spanish, French, Italian and German. Each language is a plain `.json` file in `idiomas/`, so anyone can add another one without programming.
+- **Runs without Python.** A standalone Windows program (`EternalDub.exe`) is available; see Installation.
 
 ---
 
@@ -40,20 +44,27 @@ Brazilian dubbing (and dubbing culture worldwide) is a true treasure that deserv
 | What | Notes |
 |---|---|
 | **Windows 10/11** | Tested. Linux/macOS should work by running `EternalDub_gui.py` directly, but this hasn't been tested yet. |
-| **Python 3.10+** | From [python.org](https://www.python.org/downloads/). Check **"Add python.exe to PATH"** during installation. 3.12 or 3.13 recommended. |
-| **FFmpeg** | `ffmpeg` and `ffprobe` in the PATH. On Windows: `winget install Gyan.FFmpeg` |
-| **numpy, PySide6** | Installed automatically by `Iniciar_EternalDub.bat` on the first run (or `pip install -r requirements.txt`). |
+| **FFmpeg** | `ffmpeg` and `ffprobe`: in the PATH (on Windows: `winget install Gyan.FFmpeg`) **or next to `EternalDub.exe`** (or `EternalDub_gui.py`). EternalDub also looks in the folders where winget puts it. |
+| **Python 3.10+** | Only to run from source (not needed for the standalone program). From [python.org](https://www.python.org/downloads/); check **"Add python.exe to PATH"**. 3.12 or 3.13 recommended. |
+| **numpy, PySide6** | Only to run from source. Installed automatically by `Iniciar_EternalDub.bat` on the first run (or `pip install -r requirements.txt`). |
 
 ---
 
 ## Installation
 
-**Option A: download (easiest)**
-1. Click **Code ▸ Download ZIP** on this page (or get it from **Releases**).
+**Option A: standalone program (no Python needed)**
+1. On the **Releases** page, download `EternalDub-Windows-pasta.zip` (or `EternalDub-Windows-um-arquivo.zip`, a single `.exe` that opens a bit slower).
+2. Extract it and double-click **`EternalDub.exe`**.
+3. Make sure FFmpeg is available (see Requirements).
+
+> The program is not code-signed, so Windows SmartScreen may warn on the first run: click **More info ▸ Run anyway**.
+
+**Option B: download the source (needs Python)**
+1. Click **Code ▸ Download ZIP** on this page.
 2. Extract it to a new folder.
 3. Double-click **`Iniciar_EternalDub.bat`**.
 
-**Option B: git**
+**Option C: git**
 ```bash
 git clone https://github.com/Moguel0818/EternalDub.git
 cd EternalDub
@@ -61,7 +72,11 @@ pip install -r requirements.txt
 python EternalDub_gui.py
 ```
 
-The interface opens in your system language (Portuguese or English). You can change it in **Options ▸ Idioma / Language**.
+The interface opens in your system language when a translation exists (otherwise English). You can change it in **Options ▸ Idioma / Language**.
+
+**Building the standalone program yourself**
+- With Python installed: double-click **`Gerar_EXE.bat`** (the result is in `dist\EternalDub\`).
+- Without installing anything: on GitHub, go to **Actions ▸ Gerar EternalDub.exe ▸ Run workflow**; in about 5 minutes the zip appears under **Artifacts**. Publishing a version tag (e.g. `v1.3`) also attaches the zips to **Releases**.
 
 ---
 
@@ -73,7 +88,9 @@ The interface opens in your system language (Portuguese or English). You can cha
    - *Tip:* if the dub's file also contains the original-language track (e.g. English), use **Sync ▸ Detect using another track of the file** with that track. It's more reliable and applies the result to every dub from that file.
    - If it says the versions have **different cuts**, choose **Sync section by section** (also available in **Sync ▸ Sync section by section**, Ctrl+M). The waveform then shows the dub already in place, with every splice marked in red, and the Log lists each splice.
 4. **Check the waveforms.** The movie is green and the dub is orange. Fine-tune by dragging the orange waveform or with the buttons.
-5. **Choose the movie tracks to keep** in the **Movie** tab (for example, untick audio tracks or subtitles you don't want).
+   - **Listen:** click the ruler to put the blue line where you want to start and press **F8** (again to stop). Choose what you hear in the toolbar: the dub already synced, the movie, or both together.
+   - **Fine-tune the splices** (when you used section sync): drag the red lines, use the arrow keys, or pick one in the **Splices** tab (time, amount, *Find pause*, *Listen (F9)*). Right-click the waveform to add a splice or remove a wrong one. **Ctrl+Z / Ctrl+Y** undo and redo.
+5. **Organize the final file** in the **Final file** tab: tick the tracks that go in, change the order with **Up/Down**, pick the default track, and add subtitles with **Add subtitle...** (Ctrl+L) or by dragging `.srt` files into the window.
 6. **Make test (5 min)** and listen in your player.
 7. **Make final file.** The automatic check runs at the end.
 8. *(Optional)* **Tools ▸ Verify integrity** proves that the original video, audio and subtitles are bit-identical.
@@ -87,8 +104,11 @@ Projects can be saved (`.eternaldub`) and reopened later.
 - **Analysis** uses a lightweight copy of the audio (mono, 8 kHz), used only to measure, never written to the output. Band-energy envelopes from the spectrum are cross-correlated with FFT. Several speed ratios are tested (PAL, 24 ↔ 23.976). The quick analysis reads about 1 minute plus four 40-second excerpts of the movie and searches for each one in a larger window of the dub.
 - **Section sync** measures the delay every second (6-second windows, up to ±20 s around the main delay), picks the most likely path with a Viterbi search (the delay only changes when the evidence pays for the change, so stretches with dialogue only don't create false splices), then finds the exact point of each change frame by frame (20 ms) and, among near-ties, prefers a pause in the dub. The dub is decoded once on the same timeline used by the analysis, assembled with 8 ms crossfades at the splices (no clicks) and written to FLAC (24-bit for lossy sources, 16-bit for 16-bit sources).
 - **Muxing** uses FFmpeg with `-c copy` and `-itsoffset` for the delay. Negative delays are applied with a copy-only trim of the dub. Dubs with speed correction or section sync go in as the FLAC described above, already on the movie's timeline. The movie's subtitles come in through a second read of the same file: without it, FFmpeg stops reading the dub while the subtitle track has no line, and the audio of that gap ends up far away from its video inside the file.
+- **Track layout:** the order of the `-map` options is the order of the tracks in the MKV (videos, then audios, then subtitles). Every audio and subtitle track gets explicit flags (`-disposition`): exactly one default audio, at most one default subtitle, and the movie's *forced*, *commentary*, *hearing impaired* and *visual impaired* flags are kept; `-default_mode infer_no_subs` stops the MKV from turning a subtitle on by itself. External subtitles are separate inputs: a positive delay uses `-itsoffset`, a negative one skips the beginning of the subtitle (`-ss`). MP4 subtitles (`mov_text`) become SRT, the only change the MKV requires. The integrity check matches every original track by hash wherever it ended up.
+- **Splice editing** (`EternalDub_emendas.py`): a section map is edited as a list of splices (time, silence inserted, piece removed). Moving a splice never changes the alignment of any section, only where one alignment hands over to the next; the dub always moves forward in time and no section is shorter than 50 ms. A splice whose amount is about 0 ms is removed (it would only leave a 16 ms dip in the sound). The *sound at the splice* check measures the dub's level around the cut point (the removed piece plus 50 ms on each side), and the magnet looks for the nearest spot where that level is a pause. A map that was not edited is saved exactly as it came.
+- **Preview** (`EternalDub_audio.py`): it uses the same assembler as the final file (same delay, speed correction and 8 ms crossfades). FFmpeg starts at the blue line (`-ss`) and 0.25 s blocks are played as they are decoded (mono, 48 kHz). The automated tests compare it with the real output: identical samples without speed correction, within 1 ms with it (the `atempo` filter picks its own overlap points).
 - **Cache:** waveforms are stored in `~/.eternaldub/cache`, so a movie is read in full only once. You can clear it in **Tools**.
-- **Files:** `EternalDub_gui.py` (interface), `EternalDub_core.py` (reading, detection, muxing, checks), `detectar_atraso.py` (delay detection, also usable from the command line), `EternalDub_i18n.py` (translations).
+- **Files:** `EternalDub_gui.py` (interface), `EternalDub_core.py` (reading, detection, muxing, checks), `EternalDub_emendas.py` (splice editing), `EternalDub_audio.py` (preview), `detectar_atraso.py` (delay detection, also usable from the command line), `EternalDub_i18n.py` + `idiomas/*.json` (translations), `EternalDub.spec` + `Gerar_EXE.bat` + `.github/workflows` (standalone program), `tests/` (automated tests).
 
 Command line example:
 ```bash
@@ -104,13 +124,16 @@ python detectar_atraso.py MOVIE.mkv DUB.mp4 --mapa --idioma en
 - **Section sync** depends on music and sound effects shared by both versions. In long stretches with dialogue only, the exact point of a change can be a few seconds off (in doubt, the program keeps the previous delay instead of guessing). The 5-minute test only covers the beginning, so listen to a few of the splices listed in the Log in the final file.
 - Detection relies on music and sound effects shared by both versions. If the dub has a re-recorded soundtrack, use manual alignment or **Detect by video**.
 - On slow disks (for example, an external HDD on USB 2.0), reading a UHD remux takes time. Saving the final file to a different disk helps a lot.
+- The preview is mono (FFmpeg's downmix). With speed correction the timing matches the final file to about 1 ms, but the waveform is not sample-identical.
+- While you listen, the waveform reading pauses (one disk, one job) and continues when you stop.
+- The Windows program is not code-signed, and it was built by the project's automatic workflow: please report anything odd.
 
 ## Roadmap
 
-- Editing the splice points by hand on the waveform
-- Audio playback inside the app
-- Standalone `.exe` (no Python needed)
-- More interface languages
+- Stereo / 5.1 preview (it is mono for now)
+- Code-signed `.exe` and an update notice
+- Testing on Linux and macOS
+- More interface languages (send yours: it is just a `.json` file)
 
 ---
 
@@ -119,7 +142,8 @@ python detectar_atraso.py MOVIE.mkv DUB.mp4 --mapa --idioma en
 Issues and pull requests are welcome, especially from people with experience in audio/DSP, FFmpeg or desktop UI.
 
 - **Bugs:** open an [Issue](https://github.com/Moguel0818/EternalDub/issues) and paste the contents of the **Log** tab (plus `~/.eternaldub/erro.log`, if it exists).
-- **Translations:** see `EternalDub_i18n.py`. Copy the `EN` dictionary and translate the values.
+- **Translations:** copy `idiomas/en.json` to `idiomas/<code>.json` (e.g. `fr.json`), change `codigo`, `nome` and `tradutores`, and translate the values. The language appears by itself in **Options ▸ Idioma / Language**. Run `python tests/test_idiomas.py` to see what is missing or wrong, and open a pull request.
+- **Tests:** `python -m unittest discover -s tests -t .` (needs FFmpeg; the interface tests run without a screen). They check the splice editor, the preview against the real output, the translations and the main window.
 - Everyone who helps is credited in [CREDITS.md](CREDITS.md) and in the program's **About** window.
 
 ## Transparency
@@ -128,7 +152,7 @@ The code was written with AI assistance (Claude, by Anthropic). The project was 
 
 ## Legal note
 
-EternalDub does not include, download or distribute any media. Use it only with files you have the right to use.
+EternalDub does not include, download or distribute any media (nor FFmpeg). Use it only with files you have the right to use.
 
 ## License
 

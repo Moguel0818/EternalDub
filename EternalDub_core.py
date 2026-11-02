@@ -8,7 +8,8 @@ EternalDub_core.py - nucleo do EternalDub (tudo que NAO e interface grafica).
   * le o audio LEVE so para analise (mono 8 kHz): trechos com salto direto para detectar,
     e a onda completa em segundo plano, com progresso e cache (o filme UHD so e lido uma vez);
   * detecta o atraso (usa o detectar_atraso.py; analise rapida por trechos);
-  * monta o MKV final SEM RECODIFICAR (FFmpeg com -c copy, ou mkvmerge);
+  * monta o MKV final SEM RECODIFICAR (FFmpeg com -c copy), na ordem de faixas escolhida (Organizacao),
+    com legendas externas (LegendaExterna) se houver;
   * verifica se os fluxos originais do filme continuam identicos (hash).
 
 A unica conversao que existe e opcional, e so na DUBLAGEM (vira FLAC, sem perdas):
@@ -16,8 +17,8 @@ A unica conversao que existe e opcional, e so na DUBLAGEM (vira FLAC, sem perdas
   * sincronizar TRECHO POR TRECHO, quando as versoes tem cortes diferentes (mapear()).
 O video e as faixas do filme nunca sao tocados.
 """
-import glob
 import hashlib
+import codecs
 import json
 import os
 import re
@@ -37,7 +38,7 @@ import numpy as np
 from EternalDub_i18n import tr
 import detectar_atraso as da
 
-VERSAO_NUCLEO = "1.1"
+VERSAO_NUCLEO = "1.3"
 if getattr(da, "VERSAO_DETECTOR", None) != VERSAO_NUCLEO:
     raise ImportError(tr("detectar_atraso.py (versão %s) e EternalDub_core.py (versão %s) não combinam.\n"
                          "Arquivo encontrado: %s") % (getattr(da, "VERSAO_DETECTOR", tr("antiga")), VERSAO_NUCLEO,
@@ -51,51 +52,74 @@ Cancelado = da.Cancelado
 
 
 # ----------------------------------------------------------------- ferramentas
-MKVMERGE_EXTRAS = [r"C:\Program Files\MKVToolNix\mkvmerge.exe",
-                   r"C:\Program Files (x86)\MKVToolNix\mkvmerge.exe"]
+def pasta_do_programa():
+    """Pasta onde o EternalDub esta: a do .exe (programa empacotado) ou a dos arquivos .py."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _candidatos_ffmpeg(nome):
+    """
+    Onde procurar o FFmpeg alem do PATH. Devolve (proprios, comuns):
+      proprios: a pasta do proprio EternalDub (quem baixa o ffmpeg.exe e o ffprobe.exe e os coloca ao lado
+                do EternalDub.exe nao precisa mexer em nada);
+      comuns:   pastas onde o winget e outras instalacoes costumam deixa-lo no Windows (o PATH de um
+                programa que ja estava aberto nao enxerga uma instalacao feita depois).
+    """
+    exe = nome + (".exe" if sys.platform == "win32" else "")
+    base = pasta_do_programa()
+    proprios = [base / exe, base / "ffmpeg" / exe, base / "ffmpeg" / "bin" / exe, base / "bin" / exe]
+    comuns = []
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        if local:
+            comuns.append(Path(local) / "Microsoft" / "WinGet" / "Links" / exe)
+            try:
+                comuns += sorted((Path(local) / "Microsoft" / "WinGet" / "Packages").glob(
+                    "Gyan.FFmpeg*/ffmpeg-*/bin/" + exe), reverse=True)
+            except OSError:
+                pass
+        for raiz in (os.environ.get("ProgramFiles", r"C:\Program Files"), "C:\\"):
+            comuns += [Path(raiz) / "ffmpeg" / "bin" / exe, Path(raiz) / "ffmpeg" / exe]
+    return [str(x) for x in proprios], [str(x) for x in comuns]
 
 
 @dataclass
 class Ferramentas:
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
-    mkvmerge: str = ""
 
     def aplicar(self):
         da.FFMPEG, da.FFPROBE = self.ffmpeg, self.ffprobe
 
 
 def achar_ferramentas(salvas=None):
+    """Caminho salvo nas opcoes > pasta do programa > PATH > pastas comuns do Windows."""
     salvas = salvas or {}
     f = Ferramentas()
     for nome in ("ffmpeg", "ffprobe"):
-        caminho = salvas.get(nome) or shutil.which(nome) or ""
-        setattr(f, nome, caminho if caminho and (os.path.isfile(caminho) or shutil.which(caminho)) else nome)
-    mk = salvas.get("mkvmerge") or shutil.which("mkvmerge") or ""
-    if not mk:
-        for e in MKVMERGE_EXTRAS:
-            if os.path.isfile(e):
-                mk = e
-                break
-    f.mkvmerge = mk
+        salvo = salvas.get(nome) or ""
+        proprios, comuns = _candidatos_ffmpeg(nome)
+        if salvo and (os.path.isfile(salvo) or shutil.which(salvo)):
+            escolhido = salvo
+        else:
+            escolhido = (next((c for c in proprios if os.path.isfile(c)), None) or shutil.which(nome)
+                         or next((c for c in comuns if os.path.isfile(c)), None) or nome)
+        setattr(f, nome, escolhido)
     f.aplicar()
     return f
 
 
 def versoes(f):
-    """Texto curto com as versoes do FFmpeg e do mkvmerge (ajuda a diagnosticar problemas)."""
-    partes = []
-    for nome, cmd in (("ffmpeg", [f.ffmpeg, "-version"]), ("mkvmerge", [f.mkvmerge, "--version"] if f.mkvmerge else None)):
-        if not cmd:
-            continue
-        try:
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CRIAR_SEM_JANELA,
-                               timeout=15)
-            linha = p.stdout.decode("utf-8", "replace").strip().splitlines()[0]
-            partes.append(" ".join(linha.split()[:3]))
-        except Exception:
-            partes.append(nome + " (?)")
-    return " | ".join(partes)
+    """Texto curto com a versao do FFmpeg (ajuda a diagnosticar problemas)."""
+    try:
+        p = subprocess.run([f.ffmpeg, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           stdin=subprocess.DEVNULL, creationflags=CRIAR_SEM_JANELA, timeout=15)
+        linha = p.stdout.decode("utf-8", "replace").strip().splitlines()[0]
+        return " ".join(linha.split()[:3])
+    except Exception:
+        return "ffmpeg (?)"
 
 
 def ffmpeg_ok(f):
@@ -115,6 +139,10 @@ class Faixa:
     pos: int = 0        # posicao dentro do proprio tipo (0 = primeira faixa de audio, etc.)
     inicio: float = 0.0     # onde a faixa comeca (s)
     duracao: float = 0.0    # duracao DA FAIXA (s); 0 = desconhecida (usa a do arquivo)
+    disposicao: dict = field(default_factory=dict)   # marcas da faixa: default, forced, comment...
+
+    def forcada(self):
+        return bool(self.disposicao.get("forced"))
 
     def rotulo(self):
         partes = [self.codec]
@@ -157,6 +185,11 @@ class Arquivo:
         return self.do_tipo("subtitle")
 
 
+# marcas que passam do filme para o arquivo final (a de "padrao" e decidida pela organizacao do arquivo)
+DISPOSICOES_PRESERVADAS = ("forced", "hearing_impaired", "visual_impaired", "comment", "original", "captions",
+                           "descriptions")
+
+
 def _flt(x):
     try:
         return float(x)
@@ -167,10 +200,11 @@ def _flt(x):
 def sondar_arquivo(caminho):
     cmd = [da.FFPROBE, "-v", "error", "-show_entries",
            "stream=index,codec_type,codec_name,channels,start_time,duration:stream_tags=language,title,DURATION"
-           ":format=duration,start_time",
+           ":stream_disposition=" + ",".join(("default",) + DISPOSICOES_PRESERVADAS) + ":format=duration,start_time",
            "-of", "json", caminho]
     try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=CRIAR_SEM_JANELA)
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                           creationflags=CRIAR_SEM_JANELA)
     except FileNotFoundError:
         raise RuntimeError(tr("ffprobe não encontrado. Instale o FFmpeg (ou indique o caminho em Opções)."))
     if p.returncode != 0:
@@ -189,7 +223,9 @@ def sondar_arquivo(caminho):
                                 canais=int(s.get("channels", 0) or 0),
                                 idioma=(tags.get("language") or tags.get("LANGUAGE") or "").lower(),
                                 titulo=tags.get("title") or tags.get("TITLE") or "", pos=pos,
-                                inicio=_flt(s.get("start_time")), duracao=dur))
+                                inicio=_flt(s.get("start_time")), duracao=dur,
+                                disposicao={k: int(v) for k, v in (s.get("disposition") or {}).items()
+                                            if str(v).isdigit()}))
     return arq
 
 
@@ -702,14 +738,14 @@ def mapear(film_caminho, film_pos, dub_caminho, dub_pos, atempo=1.0, centro_ms=N
 
 
 # ----------------------------------------------------------------- projeto
-@dataclass
+@dataclass(eq=False)                 # cada dublagem e um objeto proprio (duas iguais continuam sendo duas)
 class Dublagem:
     arquivo: str
     faixa: int                 # numero da faixa de audio dentro do arquivo (0 = primeira)
     nome: str = "Dublagem PT-BR"
     idioma: str = "por"
     atraso_ms: int = 0
-    padrao: bool = False
+    padrao: bool = False       # (projetos antigos; a faixa padrao agora fica na Organizacao)
     atempo: float = 1.0        # 1.0 = sem correcao de velocidade
     status: str = ""
     detalhe: str = ""
@@ -722,21 +758,100 @@ class Dublagem:
         return (os.path.abspath(self.arquivo), self.faixa)
 
 
-def salvar_projeto(caminho, filme, ref, motor, dubs, manter=None):
-    dados = {"versao": 3, "filme": filme, "faixa_referencia": ref, "motor": motor,
-             "dublagens": [asdict(d) for d in dubs], "manter": sorted(manter) if manter is not None else None}
+EXT_LEGENDA_TEXTO = (".srt", ".ass", ".ssa", ".vtt")
+LEGENDAS_PARA_SRT = ("mov_text",)          # legendas de MP4: o MKV nao as aceita como estao
+EXT_LEGENDA = EXT_LEGENDA_TEXTO + (".sup", ".idx", ".mks")
+
+
+@dataclass(eq=False)
+class LegendaExterna:
+    """Uma legenda que vem de fora do filme (.srt, .ass, .sup... ou uma faixa de legenda de outro MKV/MP4)."""
+    arquivo: str
+    faixa: int = 0             # posicao da faixa de legenda dentro do arquivo (0 = primeira)
+    nome: str = ""             # titulo da faixa no arquivo final
+    idioma: str = "por"
+    atraso_ms: int = 0         # >0: a legenda aparece mais tarde; <0: mais cedo
+    forcada: bool = False
+    codec: str = ""
+    detalhe: str = ""
+
+    def chave(self):
+        return (os.path.abspath(self.arquivo), self.faixa)
+
+
+PROJETO_VERSAO = 5        # 5: legendas externas e organizacao do arquivo final; le 4 e anteriores
+
+
+def _indice(lista, obj):
+    return next((i for i, x in enumerate(lista) if x is obj), None)
+
+
+def chave_para_json(k, dubs, legendas):
+    """("dub", objeto) -> ["dub", posicao na lista] (para gravar no projeto). None se a faixa nao existe mais."""
+    if k is None:
+        return None
+    if k[0] == "filme":
+        return ["filme", int(k[1])]
+    i = _indice(dubs if k[0] == "dub" else legendas, k[1])
+    return None if i is None else [k[0], i]
+
+
+def chave_do_json(v, dubs, legendas):
+    try:
+        tipo, i = v[0], int(v[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if tipo == "filme":
+        return ("filme", i)
+    lista = dubs if tipo == "dub" else (legendas if tipo == "leg" else [])
+    return (tipo, lista[i]) if 0 <= i < len(lista) else None
+
+
+def salvar_projeto(caminho, filme, ref, dubs, manter=None, legendas=(), org=None, idioma_original="",
+                   organizacao_manual=False):
+    legendas = list(legendas)
+    lista = [asdict(d) for d in dubs]
+    if org is not None:      # 'padrao' da dublagem acompanha a organizacao (versoes antigas leem so ele)
+        for d, j in zip(dubs, lista):
+            j["padrao"] = org.padrao_audio is not None and org.padrao_audio[0] == "dub" and org.padrao_audio[1] is d
+    dados = {"versao": PROJETO_VERSAO, "filme": filme, "faixa_referencia": ref,
+             "dublagens": lista, "manter": sorted(manter) if manter is not None else None,
+             "legendas": [asdict(x) for x in legendas], "idioma_original": idioma_original or "",
+             "organizacao_manual": bool(organizacao_manual)}
+    if org is not None:
+        dados["ordem"] = [c for c in (chave_para_json(k, dubs, legendas) for k in org.ordem) if c is not None]
+        dados["padrao_audio"] = chave_para_json(org.padrao_audio, dubs, legendas)
+        dados["padrao_legenda"] = chave_para_json(org.padrao_legenda, dubs, legendas)
     with open(caminho, "w", encoding="utf-8") as f:
         json.dump(dados, f, ensure_ascii=False, indent=2)
 
 
 def abrir_projeto(caminho):
+    """
+    Devolve um dicionario: filme, ref, dublagens, legendas, manter, ordem, padrao_audio, padrao_legenda,
+    idioma_original, organizacao_manual (os que um projeto antigo nao tem vem vazios). Campos que nao existem
+    mais sao ignorados.
+    """
     with open(caminho, "r", encoding="utf-8") as f:
         j = json.load(f)
     campos = Dublagem.__dataclass_fields__.keys()
     dubs = [Dublagem(**{k: v for k, v in d.items() if k in campos}) for d in j.get("dublagens", [])]
+    campos_l = LegendaExterna.__dataclass_fields__.keys()
+    legendas = [LegendaExterna(**{k: v for k, v in x.items() if k in campos_l}) for x in j.get("legendas", [])]
     manter = j.get("manter")
-    return (j.get("filme", ""), int(j.get("faixa_referencia", 0)), j.get("motor", ""), dubs,
-            set(manter) if manter is not None else None)
+    ordem = None
+    if j.get("ordem") is not None:
+        ordem = [c for c in (chave_do_json(v, dubs, legendas) for v in j["ordem"]) if c is not None]
+    if "padrao_audio" in j:                           # projeto 1.3 (None = o primeiro audio)
+        padrao_audio = chave_do_json(j["padrao_audio"], dubs, legendas) if j["padrao_audio"] else None
+    else:                                             # projetos antigos: a dublagem marcada como padrao
+        padrao_audio = next((("dub", d) for d in dubs if d.padrao), None)
+    return {"filme": j.get("filme", ""), "ref": int(j.get("faixa_referencia", 0)), "dublagens": dubs,
+            "legendas": legendas, "manter": set(manter) if manter is not None else None, "ordem": ordem,
+            "padrao_audio": padrao_audio,
+            "padrao_legenda": chave_do_json(j["padrao_legenda"], dubs, legendas) if j.get("padrao_legenda") else None,
+            "idioma_original": j.get("idioma_original", "") or "",
+            "organizacao_manual": bool(j.get("organizacao_manual", False))}
 
 
 # ----------------------------------------------------------------- executar programas
@@ -795,9 +910,8 @@ def _segundos(texto):
 
 
 # ----------------------------------------------------------------- montagem
-def validar(film, dubs):
-    if not dubs:
-        raise RuntimeError(tr("Adicione pelo menos uma dublagem."))
+def validar(film, dubs, legendas=()):
+    """Arquivos existem e nada foi adicionado duas vezes. (Sem dublagem tambem vale: so reorganizar o filme.)"""
     vistos = set()
     for d in dubs:
         if not os.path.isfile(d.arquivo):
@@ -805,8 +919,13 @@ def validar(film, dubs):
         if d.chave() in vistos:
             raise RuntimeError(tr("A mesma faixa foi adicionada duas vezes: %s (faixa %d)") % (d.arquivo, d.faixa))
         vistos.add(d.chave())
-    if sum(1 for d in dubs if d.padrao) > 1:
-        raise RuntimeError(tr("Só uma dublagem pode ser a faixa padrão."))
+    vistas = set()
+    for x in legendas:
+        if not os.path.isfile(x.arquivo):
+            raise RuntimeError(tr("Arquivo da legenda não encontrado:\n%s") % x.arquivo)
+        if x.chave() in vistas:
+            raise RuntimeError(tr("A mesma legenda foi adicionada duas vezes: %s (faixa %d)") % (x.arquivo, x.faixa))
+        vistas.add(x.chave())
 
 
 def _sondar_faixa_audio(caminho, pos, ferr):
@@ -814,7 +933,7 @@ def _sondar_faixa_audio(caminho, pos, ferr):
     p = subprocess.run([ferr.ffprobe, "-v", "error", "-select_streams", "a:%d" % pos, "-show_entries",
                         "stream=codec_name,sample_rate,channels,bits_per_raw_sample,bits_per_sample,sample_fmt",
                         "-of", "json", caminho], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       creationflags=CRIAR_SEM_JANELA)
+                       stdin=subprocess.DEVNULL, creationflags=CRIAR_SEM_JANELA)
     try:
         st = json.loads(p.stdout.decode("utf-8", "replace")).get("streams", [])[0]
     except (ValueError, IndexError):
@@ -851,6 +970,138 @@ def _cabecalho_wav(f):
     return fmt, canais, bits
 
 
+def plano_de_pedacos(pedacos, atempo, sr, limite_s=None):
+    """
+    Converte os pedacos [[ini_filme, fim_filme, ini_dub], ...] (segundos; ini_dub no tempo ORIGINAL da
+    dublagem) no plano de montagem, em amostras: [[o0, o1, i0], ...] = a saida [o0, o1) vem da entrada a
+    partir de i0, ja depois da correcao de velocidade (o tempo esticado da dublagem: ini_dub / atempo).
+    """
+    r = 1.0 / float(atempo or 1.0)
+    lim = int(round(limite_s * sr)) if limite_s else None
+    plano = []
+    for fi, ff, di in sorted(pedacos, key=lambda x: x[0]):
+        o0, o1, i0 = int(round(fi * sr)), int(round(min(ff, 1e7) * sr)), int(round(di * r * sr))
+        if lim is not None:
+            o1 = min(o1, lim)
+        if o1 > o0:
+            plano.append([o0, o1, i0])
+    return plano
+
+
+class MontadorPedacos:
+    """
+    Monta o audio da dublagem na linha do tempo do FILME a partir de UMA leitura sequencial da dublagem
+    (o que e usado tanto para gerar o FLAC final quanto para a previa dentro do programa: o que se ouve
+    na previa e o que vai para o arquivo).
+
+      plano:       [[o0, o1, i0], ...] em amostras (veja plano_de_pedacos): a saida [o0, o1) vem da entrada
+                   a partir de i0. Entre os pedacos fica silencio; o que fica de fora da dublagem nao entra.
+      canais, sr:  formato das amostras (float32) que `ler_bytes` entrega.
+      ler_bytes:   ler_bytes(n) devolve ate n bytes da entrada (menos que n so no fim da dublagem).
+      escrever:    escrever(array float32 (k, canais)) recebe a saida, em ordem, sem lacunas.
+      cancelar:    Event; acionado, a montagem para com Cancelado.
+      prog:        prog(0..99), chamado ~1x por segundo.
+    Cada emenda ganha um cruzamento de 8 ms (sem estalos) e a dublagem nunca volta no tempo.
+    """
+
+    def __init__(self, plano, canais, sr, ler_bytes, escrever, cancelar=None, prog=None, bloco=None):
+        self.P = plano
+        self.C = int(canais)
+        self.sr = int(sr)
+        self.ler_bytes = ler_bytes
+        self.escrever_saida = escrever
+        self.cancelar = cancelar or threading.Event()
+        self.prog = prog or (lambda v: None)
+        self.bloco = int(bloco or sr)                  # amostras por vez (1 s por padrao)
+        self.total = plano[-1][1] if plano else 0
+        self.entrada = 0                               # amostras ja lidas da entrada
+        self.saida = 0                                 # amostras ja escritas na saida
+        self.fim = False                               # a entrada acabou
+        self._t = time.monotonic()
+        F = max(1, int(round(0.008 * self.sr)))        # cruzamento de 8 ms nas emendas
+        x = (np.arange(F, dtype=np.float32) + 0.5) / F
+        self.F = F
+        self.sobe, self.desce = np.sin(0.5 * np.pi * x)[:, None], np.cos(0.5 * np.pi * x)[:, None]
+
+    # ---- entrada e saida
+    def _ler(self, n):
+        nb = n * 4 * self.C
+        dados = bytearray()
+        while len(dados) < nb:
+            parte = self.ler_bytes(nb - len(dados))
+            if not parte:
+                self.fim = True
+                break
+            dados += parte
+        k = len(dados) // (4 * self.C)
+        self.entrada += k
+        return np.frombuffer(bytes(dados[:k * 4 * self.C]), dtype="<f4").reshape(k, self.C)
+
+    def _escrever(self, arr):
+        if self.cancelar.is_set():
+            raise Cancelado()
+        self.escrever_saida(arr)
+        self.saida += len(arr)
+        agora = time.monotonic()
+        if agora - self._t > 1.0:
+            self._t = agora
+            self.prog(min(99, int(100 * self.saida / max(1, self.total))))
+
+    def _silencio(self, n):
+        while n > 0:
+            k = min(n, self.bloco)
+            self._escrever(np.zeros((k, self.C), np.float32))
+            n -= k
+
+    def _pular(self, n):
+        while n > 0 and not self.fim:
+            n -= len(self._ler(min(n, self.bloco)))
+
+    # ---- montagem
+    def executar(self):
+        P, F, sobe, desce = self.P, self.F, self.sobe, self.desce
+        cauda = None                               # fim do pedaco anterior (sumindo), para cruzar com o proximo
+        for k, (o0, o1, i0) in enumerate(P):
+            if cauda is not None and o0 != self.saida:
+                self._escrever(cauda * desce[:len(cauda)])       # nao emenda direto: so some
+                cauda = None
+            if o0 > self.saida:
+                self._silencio(o0 - self.saida)
+            elif o0 < self.saida:                  # (arredondamentos) nunca volta no tempo
+                i0 += self.saida - o0
+                o0 = self.saida
+            if i0 > self.entrada:
+                self._pular(i0 - self.entrada)
+            elif i0 < self.entrada:                # a dublagem nunca volta: o que ja passou vira silencio
+                self._silencio(self.entrada - i0)
+                o0 += self.entrada - i0
+            if self.fim or o1 <= o0:
+                break
+            n = o1 - o0
+            prox = P[k + 1] if k + 1 < len(P) else None
+            emenda_direta = prox is not None and prox[0] == o1 and prox[2] - (self.entrada + n) >= F
+            feitos = 0
+            while feitos < n:
+                y = self._ler(min(self.bloco, n - feitos)).copy()
+                if not len(y):
+                    break
+                if feitos == 0:                    # comeco do pedaco: cruza com a cauda ou aparece suave
+                    m = min(F, len(y))
+                    y[:m] *= sobe[:m]
+                    if cauda is not None:
+                        y[:m] += cauda[:m] * desce[:m]
+                    cauda = None
+                feitos += len(y)
+                if feitos >= n and not emenda_direta:
+                    m = min(F, len(y))             # fim do pedaco: some suave
+                    y[-m:] *= desce[F - m:]
+                self._escrever(y)
+            if emenda_direta and feitos >= n:
+                cauda = self._ler(F).copy()        # o que vem logo depois (vai sair): so para o cruzamento
+        if cauda is not None:
+            self._escrever(cauda * desce[:len(cauda)])
+
+
 def montar_por_pedacos(src, idx, pedacos, atempo, saida, ferr, msg=None, prog=None, cancelar=None,
                        limite_s=None):
     """
@@ -859,28 +1110,20 @@ def montar_por_pedacos(src, idx, pedacos, atempo, saida, ferr, msg=None, prog=No
       Entre os pedacos fica silencio; o que fica de fora da dublagem nao entra.
     A faixa e decodificada UMA vez, com a mesma linha do tempo da analise (aresample first_pts=0, que
     respeita o atraso embutido no arquivo), passa pela correcao de velocidade (atempo) se houver, e cada
-    emenda ganha um cruzamento de 8 ms (sem estalos). O arquivo final comeca no tempo 0 do filme.
+    emenda ganha um cruzamento de 8 ms (sem estalos): veja MontadorPedacos. O arquivo final comeca no
+    tempo 0 do filme.
     """
     msg = msg or (lambda m: None)
     prog = prog or (lambda v: None)
     cancelar = cancelar or threading.Event()
     info = _sondar_faixa_audio(src, idx, ferr)
     sr = info["sr"]
-    r = 1.0 / float(atempo or 1.0)
     filtro = "aresample=async=1:first_pts=0"
-    if abs(r - 1.0) > 1e-9:
+    if abs(1.0 / float(atempo or 1.0) - 1.0) > 1e-9:
         filtro += ",atempo=%.8f" % atempo
-    lim = int(round(limite_s * sr)) if limite_s else None
-    P = []                                         # em amostras: saida [o0, o1) <- entrada a partir de i0
-    for fi, ff, di in sorted(pedacos, key=lambda x: x[0]):
-        o0, o1, i0 = int(round(fi * sr)), int(round(min(ff, 1e7) * sr)), int(round(di * r * sr))
-        if lim is not None:
-            o1 = min(o1, lim)
-        if o1 > o0:
-            P.append([o0, o1, i0])
+    P = plano_de_pedacos(pedacos, atempo, sr, limite_s)
     if not P:
         raise RuntimeError(tr("Nenhum pedaço da dublagem cai dentro do filme."))
-    total = P[-1][1]
     bits_flac = ["-sample_fmt", "s16"] if info["codec"] in ("pcm_s16le", "pcm_s16be", "flac", "alac") \
         and 0 < info["bits"] <= 16 else ["-sample_fmt", "s32", "-bits_per_raw_sample", "24"]
     dec = [ferr.ffmpeg, "-v", "error", "-nostdin", "-i", src, "-map", "0:a:%d" % idx, "-vn", "-sn", "-dn",
@@ -900,85 +1143,9 @@ def montar_por_pedacos(src, idx, pedacos, atempo, saida, ferr, msg=None, prog=No
                                  creationflags=CRIAR_SEM_JANELA)
         p_enc.stdin.write(b"RIFF\xff\xff\xff\xffWAVEfmt " + len(fmt).to_bytes(4, "little") + fmt +
                           (b"\0" if len(fmt) & 1 else b"") + b"data\xff\xff\xff\xff")
-        F = max(1, int(round(0.008 * sr)))         # cruzamento de 8 ms nas emendas
-        x = (np.arange(F, dtype=np.float32) + 0.5) / F
-        sobe, desce = np.sin(0.5 * np.pi * x)[:, None], np.cos(0.5 * np.pi * x)[:, None]
-        bloco = sr                                 # 1 s por vez
-        estado = {"in": 0, "out": 0, "fim": False, "t": time.monotonic()}
-
-        def ler(n):
-            nb = n * 4 * C
-            dados = bytearray()
-            while len(dados) < nb:
-                parte = p_dec.stdout.read(nb - len(dados))
-                if not parte:
-                    estado["fim"] = True
-                    break
-                dados += parte
-            k = len(dados) // (4 * C)
-            estado["in"] += k
-            return np.frombuffer(bytes(dados[:k * 4 * C]), dtype="<f4").reshape(k, C)
-
-        def escrever(arr):
-            if cancelar.is_set():
-                raise Cancelado()
-            p_enc.stdin.write(np.ascontiguousarray(arr, dtype="<f4").tobytes())
-            estado["out"] += len(arr)
-            agora = time.monotonic()
-            if agora - estado["t"] > 1.0:
-                estado["t"] = agora
-                prog(min(99, int(100 * estado["out"] / max(1, total))))
-
-        def silencio(n):
-            while n > 0:
-                k = min(n, bloco)
-                escrever(np.zeros((k, C), np.float32))
-                n -= k
-
-        def pular(n):
-            while n > 0 and not estado["fim"]:
-                n -= len(ler(min(n, bloco)))
-
-        cauda = None                               # fim do pedaco anterior (sumindo), para cruzar com o proximo
-        for k, (o0, o1, i0) in enumerate(P):
-            if cauda is not None and o0 != estado["out"]:
-                escrever(cauda * desce[:len(cauda)])       # nao emenda direto: so some
-                cauda = None
-            if o0 > estado["out"]:
-                silencio(o0 - estado["out"])
-            elif o0 < estado["out"]:               # (arredondamentos) nunca volta no tempo
-                i0 += estado["out"] - o0
-                o0 = estado["out"]
-            if i0 > estado["in"]:
-                pular(i0 - estado["in"])
-            elif i0 < estado["in"]:                # a dublagem nunca volta: o que ja passou vira silencio
-                silencio(estado["in"] - i0)
-                o0 += estado["in"] - i0
-            if estado["fim"] or o1 <= o0:
-                break
-            n = o1 - o0
-            prox = P[k + 1] if k + 1 < len(P) else None
-            emenda_direta = prox is not None and prox[0] == o1 and prox[2] - (estado["in"] + n) >= F
-            feitos = 0
-            while feitos < n:
-                y = ler(min(bloco, n - feitos)).copy()
-                if not len(y):
-                    break
-                if feitos == 0:                    # comeco do pedaco: cruza com a cauda ou aparece suave
-                    m = min(F, len(y))
-                    y[:m] *= sobe[:m]
-                    if cauda is not None:
-                        y[:m] += cauda[:m] * desce[:m]
-                    cauda = None
-                feitos += len(y)
-                if feitos >= n and not emenda_direta:
-                    m = min(F, len(y))             # fim do pedaco: some suave
-                    y[-m:] *= desce[F - m:]
-                escrever(y)
-            if emenda_direta and feitos >= n:
-                cauda = ler(F).copy()              # o que vem logo depois (vai sair): so para o cruzamento
-        if cauda is not None:
-            escrever(cauda * desce[:len(cauda)])
+        MontadorPedacos(P, C, sr, p_dec.stdout.read,
+                        lambda arr: p_enc.stdin.write(np.ascontiguousarray(arr, dtype="<f4").tobytes()),
+                        cancelar, prog).executar()
         p_enc.stdin.close()
         rc = p_enc.wait()
         if rc != 0:
@@ -1078,26 +1245,273 @@ def validar_manter(film, manter):
         raise RuntimeError(tr("Mantenha pelo menos uma faixa de vídeo do filme."))
 
 
-def comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar=None, manter=None):
+# ----------------------------------------------------------------- organizacao do arquivo final
+# Uma faixa do arquivo final e identificada por uma CHAVE:
+#   ("filme", indice_do_fluxo)   faixa do proprio filme
+#   ("dub", Dublagem)            dublagem adicionada
+#   ("leg", LegendaExterna)      legenda externa adicionada
+# O arquivo final sempre tem os videos, depois os audios, depois as legendas; DENTRO de cada tipo vale a
+# ordem da lista `ordem`. Faixas do filme fora de `manter` nao entram (dublagens e legendas da lista entram).
+IDIOMAS_PT = ("por", "pt", "pob", "pt-br", "ptb")
+_SINAIS_PORTUGAL = ("portugal", "pt-pt", "european", "europeu", "europeo", "européen", "europäisch")
+_SINAIS_COMENTARIO = ("comment", "coment", "kommentar", "commento", "commentaire")
+_SINAIS_DESCRICAO = ("descri", "audiodesc", "audio desc", "hörfilm")
+
+
+@dataclass
+class Organizacao:
+    ordem: list = field(default_factory=list)   # chaves em ordem (as que faltarem entram no fim do seu tipo)
+    manter: set = None                          # indices das faixas do FILME que entram (None = todas)
+    padrao_audio: tuple = None                  # chave do audio que toca sozinho (None = o primeiro)
+    padrao_legenda: tuple = None                # chave da legenda que aparece sozinha (None = nenhuma)
+
+
+def eh_portugues(idioma):
+    return (idioma or "").strip().lower() in IDIOMAS_PT
+
+
+def eh_ptbr(idioma, titulo=""):
+    """Portugues do Brasil: portugues sem sinal de ser de Portugal no titulo ('pob' e 'pt-BR' contam)."""
+    t = (titulo or "").lower()
+    return eh_portugues(idioma) and not any(x in t for x in _SINAIS_PORTUGAL)
+
+
+def eh_comentario(f):
+    """Faixa de comentarios (diretor, elenco...): marcada assim no arquivo ou com isso no titulo."""
+    return bool(f.disposicao.get("comment")) or any(x in (f.titulo or "").lower() for x in _SINAIS_COMENTARIO)
+
+
+def eh_extra(f):
+    """Comentarios ou audiodescricao: faixas que o padrao nao poe no arquivo."""
+    return eh_comentario(f) or bool(f.disposicao.get("visual_impaired")) or \
+        any(x in (f.titulo or "").lower() for x in _SINAIS_DESCRICAO)
+
+
+def idioma_original_auto(film):
     """
-    Prepara os cortes (atraso negativo) e devolve o comando final do FFmpeg (copia sem recodificar).
+    Idioma original do filme: o da primeira faixa de audio que nao e portugues nem comentario (num remux, a
+    primeira faixa costuma ser a do idioma original). Filme nacional (so audio em portugues): 'por'.
+    """
+    for f in film.audios:
+        if f.idioma and f.idioma not in ("und", "zxx", "mul", "mis") and not eh_portugues(f.idioma) \
+                and not eh_extra(f):
+            return f.idioma
+    return next((f.idioma for f in film.audios if f.idioma), "")
+
+
+def _faixa_por_idx(film):
+    return {f.idx: f for f in film.faixas}
+
+
+def tipo_da_chave(film, k, _cache=None):
+    if k[0] == "dub":
+        return "audio"
+    if k[0] == "leg":
+        return "subtitle"
+    f = (_cache or _faixa_por_idx(film)).get(k[1])
+    return f.tipo if f else None
+
+
+def completar_ordem(film, dubs=(), legendas=(), ordem=None):
+    """
+    A ordem com todas as faixas que existem agora: tira o que saiu da lista (dublagem removida...) e poe no fim
+    o que ainda nao estava (faixas do filme na ordem do arquivo, depois dublagens e legendas na ordem da lista).
+    """
+    fx = _faixa_por_idx(film)
+    validas = [("filme", f.idx) for f in film.faixas if f.tipo in TIPOS_ESCOLHIVEIS] + \
+              [("dub", d) for d in dubs] + [("leg", x) for x in legendas]
+    nova = []
+    for k in ordem or []:
+        if k in validas and k not in nova and tipo_da_chave(film, k, fx):
+            nova.append(k)
+    return nova + [k for k in validas if k not in nova]
+
+
+def itens_saida(film, dubs=(), legendas=(), org=None):
+    """{"video": [...], "audio": [...], "subtitle": [...]}: as chaves que entram no arquivo final, em ordem."""
+    org = org or Organizacao()
+    fx = _faixa_por_idx(film)
+    grupos = {t: [] for t in TIPOS_ESCOLHIVEIS}
+    for k in completar_ordem(film, dubs, legendas, org.ordem):
+        if k[0] == "filme" and org.manter is not None and k[1] not in org.manter:
+            continue
+        grupos[tipo_da_chave(film, k, fx)].append(k)
+    return grupos
+
+
+def padroes_efetivos(itens, org):
+    """(chave do audio padrao, chave da legenda padrao ou None) do que realmente entra no arquivo."""
+    a = org.padrao_audio if org.padrao_audio is not None and org.padrao_audio in itens["audio"] else \
+        (itens["audio"][0] if itens["audio"] else None)
+    s = org.padrao_legenda if org.padrao_legenda is not None and org.padrao_legenda in itens["subtitle"] else None
+    return a, s
+
+
+def disposicao(film, k, padrao, _cache=None):
+    """Marcas da faixa no arquivo final (ex.: 'default', 'forced', 'default+forced'; '0' = nenhuma)."""
+    marcas = []
+    if k[0] == "filme":
+        f = (_cache or _faixa_por_idx(film)).get(k[1])
+        marcas = [m for m in DISPOSICOES_PRESERVADAS if f is not None and f.disposicao.get(m)]
+    elif k[0] == "leg" and k[1].forcada:
+        marcas = ["forced"]
+    if padrao:
+        marcas.insert(0, "default")
+    return "+".join(marcas) or "0"
+
+
+def organizar_padrao(film, dubs=(), legendas=(), idioma_original=None):
+    """
+    O padrao de BDRemux do EternalDub (pedido do criador do projeto):
+      audio:   1) as dublagens em PT-BR (na ordem da lista)  2) as faixas PT-BR que o filme ja tem
+               3) a faixa principal do idioma original (a primeira dele que nao e comentario nem audiodescricao)
+               4) as outras dublagens adicionadas
+      legenda: 1) PT-BR completa  2) PT-BR forcada  3) as outras legendas externas. Uma legenda externa PT-BR
+               substitui as do filme do MESMO tipo (uma completa externa tira as completas do filme, mas a
+               forcada do filme continua: ela traduz placas e falas em outro idioma enquanto se ouve a dublagem).
+               Entre as do filme, a comum vem antes da para surdos.
+    O video entra inteiro. As outras faixas do filme ficam desmarcadas, no fim da lista (da para marcar de novo).
+    O primeiro audio e o padrao; nenhuma legenda e padrao (as forcadas continuam forcadas).
+    """
+    idioma_original = (idioma_original or idioma_original_auto(film) or "").lower()
+    ordem, manter = [], set()
+
+    def por(f, k=None):
+        k = k or ("filme", f.idx)
+        if k not in ordem:
+            ordem.append(k)
+            if k[0] == "filme":
+                manter.add(f.idx)
+
+    for f in film.videos:
+        por(f)
+    for d in dubs:                                             # 1) dublagens PT-BR
+        if eh_ptbr(d.idioma, d.nome):
+            por(None, ("dub", d))
+    for f in film.audios:                                      # 2) PT-BR do proprio filme
+        if eh_ptbr(f.idioma, f.titulo) and not eh_extra(f):
+            por(f)
+    principais = [f for f in film.audios if not eh_extra(f) and not eh_ptbr(f.idioma, f.titulo)]
+    original = next((f for f in principais if (f.idioma or "").lower() == idioma_original), None)
+    if original is None and not eh_portugues(idioma_original):  # idioma sem marca no arquivo: a 1a nao-PT
+        original = next((f for f in principais if (f.idioma or "") in ("", "und")), None)
+    if original is not None:                                   # 3) idioma original
+        por(original)
+    for d in dubs:                                             # 4) outras dublagens adicionadas
+        por(None, ("dub", d))
+    ext_pt = [x for x in legendas if eh_ptbr(x.idioma, x.nome)]
+    pt_filme = [f for f in film.legendas if eh_ptbr(f.idioma, f.titulo)]
+    for forcada in (False, True):                              # legendas: 1) PT-BR completa  2) PT-BR forcada
+        externas = [x for x in ext_pt if bool(x.forcada) == forcada]
+        for x in externas:
+            por(None, ("leg", x))
+        if not externas:                                       # sem externa desse tipo: as do filme
+            for f in sorted((f for f in pt_filme if f.forcada() == forcada),
+                            key=lambda f: bool(f.disposicao.get("hearing_impaired"))):
+                por(f)
+    for x in legendas:                                         # 3) outras externas
+        por(None, ("leg", x))
+    resto = [k for k in completar_ordem(film, dubs, legendas) if k not in ordem]   # desmarcadas, no fim
+    return Organizacao(ordem=ordem + resto, manter=manter, padrao_audio=None, padrao_legenda=None)
+
+
+def posicoes_para_conferencia(film, dubs, legendas, org, ref_pos):
+    """
+    Para a conferencia depois de gerar: (posicoes das dublagens entre os audios do arquivo final, nomes delas,
+    posicao da faixa de referencia do filme ou None se ela nao entrou).
+    """
+    audio = itens_saida(film, dubs, legendas, org)["audio"]
+    posicoes = [i for i, k in enumerate(audio) if k[0] == "dub"]
+    nomes = [audio[i][1].nome for i in posicoes]
+    ref = ("filme", film.audios[ref_pos].idx) if 0 <= ref_pos < len(film.audios) else None
+    return posicoes, nomes, (audio.index(ref) if ref in audio else None)
+
+
+_DEFAULT_MODE = {}
+
+
+def suporta_default_mode(ferr):
+    """O FFmpeg conhece a opcao -default_mode do MKV (4.4 ou mais novo)? Sem ela, o MKV marcaria sozinho a
+    primeira legenda como padrao (e ela apareceria sem ninguem pedir)."""
+    if ferr.ffmpeg not in _DEFAULT_MODE:
+        try:
+            p = subprocess.run([ferr.ffmpeg, "-hide_banner", "-h", "muxer=matroska"], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, creationflags=CRIAR_SEM_JANELA,
+                               timeout=20)
+            _DEFAULT_MODE[ferr.ffmpeg] = b"default_mode" in p.stdout
+        except Exception:
+            _DEFAULT_MODE[ferr.ffmpeg] = False
+    return _DEFAULT_MODE[ferr.ffmpeg]
+
+
+# ----------------------------------------------------------------- legendas externas
+def para_utf8(caminho, destino):
+    """
+    Legendas de texto em portugues muitas vezes vem em Windows-1252 (ANSI) ou UTF-16; o FFmpeg espera UTF-8 e
+    perderia os acentos (ou linhas inteiras). Devolve (arquivo a usar, codificacao original): o proprio arquivo
+    se ja for UTF-8, ou uma copia em UTF-8 gravada em `destino`.
+    """
+    with open(caminho, "rb") as f:
+        dados = f.read()
+    if dados.startswith(codecs.BOM_UTF8):
+        return caminho, "utf-8"
+    if dados.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        texto, origem = dados.decode("utf-16"), "utf-16"
+    else:
+        try:
+            dados.decode("utf-8")
+            return caminho, "utf-8"
+        except UnicodeDecodeError:
+            texto, origem = dados.decode("cp1252", errors="replace"), "windows-1252"
+    with open(destino, "w", encoding="utf-8", newline="") as f:
+        f.write(texto)
+    return destino, origem
+
+
+def _preparar_legendas(legendas, tmp, msg):
+    """Legendas de texto que nao estao em UTF-8 viram uma copia em UTF-8 (o conteudo nao muda)."""
+    saida = []
+    for k, x in enumerate(legendas, 1):
+        src = x.arquivo
+        ext = os.path.splitext(src)[1].lower()
+        if ext in EXT_LEGENDA_TEXTO:
+            src, origem = para_utf8(src, os.path.join(tmp, "legenda%d%s" % (k, ext)))
+            if origem != "utf-8":
+                msg(tr("Legenda %d: texto em %s convertido para UTF-8 (os acentos ficam certos).") % (k, origem))
+        saida.append({"l": x, "src": src, "idx": x.faixa, "atraso": int(x.atraso_ms or 0)})
+    return saida
+
+
+# ----------------------------------------------------------------- comando final
+def comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar=None, org=None, legendas=(), manter=None):
+    """
+    Prepara os cortes (atraso negativo) e devolve o comando final do FFmpeg (copia sem recodificar), com as
+    faixas na ordem da Organizacao: videos, depois audios, depois legendas.
+      fontes:   dublagens prontas (de _preparar_dublagens);  legendas: legendas prontas (de _preparar_legendas).
     Dublagens do MESMO arquivo com o MESMO atraso entram por UMA entrada so (o arquivo e lido uma vez).
 
-    LEGENDAS: entram por uma entrada PROPRIA (o mesmo arquivo do filme, so com as legendas). Motivo: o
+    LEGENDAS DO FILME: entram por uma entrada PROPRIA (o mesmo arquivo do filme, so com as legendas). Motivo: o
     FFmpeg escolhe qual arquivo ler pela faixa mais "atrasada"; uma legenda que fica um tempo sem fala
     parece atrasada, entao ele so le o arquivo do filme e para de ler a dublagem ate aparecer a proxima
     legenda. O audio desse intervalo acaba gravado muito depois no arquivo (ate minutos) e os players
     tocam SILENCIO ali (cada um aguenta um pouco diferente). Com a entrada propria, ele avanca so a
     leitura das legendas ate a proxima fala, e filme e dublagem seguem lado a lado. A segunda leitura
     acontece quase junto da primeira, entao o sistema normalmente a serve da memoria (cache do disco).
+    As legendas externas ja sao entradas proprias.
+
+    PADRAO: todas as faixas de audio e de legenda recebem as marcas explicitas (uma de audio e no maximo uma de
+    legenda como padrao; forcada, comentario etc. do filme continuam), e o MKV nao inventa uma legenda padrao.
     """
-    mantidas = faixas_mantidas(film, manter)
-    n_a = sum(1 for f in mantidas if f.tipo == "audio")
+    if org is None:
+        org = Organizacao(manter=manter)
+    fx = _faixa_por_idx(film)
+    dubs = [f["d"] for f in fontes]
+    legs = [x["l"] for x in legendas]
+    itens = itens_saida(film, dubs, legs, org)
     cmd = [ferr.ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-v", "warning", "-progress", "pipe:1", "-y",
            "-i", film.caminho]
-    entradas = {}
-    mapas, meta = [], []
-    padrao_idx = None
+    n_entradas = 1
+    entradas, mapa_dub = {}, {}
     for k, f in enumerate(fontes, 1):
         d, src, idx, atraso = f["d"], f["src"], f["idx"], f.get("atraso", f["d"].atraso_ms)
         if atraso < 0:
@@ -1108,138 +1522,86 @@ def comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar=None, ma
             src, idx, atraso = corte, 0, 0
         chave = (os.path.abspath(src), atraso)
         if chave not in entradas:
-            entradas[chave] = len(entradas) + 1
+            entradas[chave] = n_entradas
+            n_entradas += 1
             if atraso > 0:
                 cmd += ["-itsoffset", "%dms" % atraso]
             cmd += ["-i", src]
-        mapas += ["-map", "%d:a:%d" % (entradas[chave], idx)]
-        saida_a = n_a + k - 1
-        meta += ["-metadata:s:a:%d" % saida_a, "language=%s" % (d.idioma or "und"),
-                 "-metadata:s:a:%d" % saida_a, "title=%s" % d.nome]
-        if d.padrao:
-            padrao_idx = saida_a
+        mapa_dub[id(d)] = "%d:a:%d" % (entradas[chave], idx)
     entrada_leg = None
-    if any(f.tipo == "subtitle" for f in mantidas):          # legendas por uma entrada propria (ver acima)
-        entrada_leg = len(entradas) + 1
+    if any(k[0] == "filme" for k in itens["subtitle"]):        # legendas do filme por uma entrada propria
+        entrada_leg = n_entradas
+        n_entradas += 1
         cmd += ["-vn", "-an", "-dn", "-i", film.caminho]
-    for f in mantidas:
-        cmd += ["-map", "%d:%d" % (entrada_leg if f.tipo == "subtitle" else 0, f.idx)]
-    cmd += mapas + ["-map", "0:t?", "-c", "copy"] + meta     # 0:t? = anexos do filme (fontes etc.)
-    if padrao_idx is not None:
-        for i in range(n_a + len(fontes)):
-            cmd += ["-disposition:a:%d" % i, "default" if i == padrao_idx else "0"]
+    mapa_leg = {}
+    for x in legendas:
+        if x["atraso"] > 0:
+            cmd += ["-itsoffset", "%dms" % x["atraso"]]
+        elif x["atraso"] < 0:                                   # mais cedo: pula o comeco da legenda (sem
+            cmd += ["-ss", "%.3f" % (-x["atraso"] / 1000.0)]    # tempos negativos, que deslocariam o arquivo)
+        cmd += ["-i", x["src"]]
+        mapa_leg[id(x["l"])] = "%d:s:%d" % (n_entradas, x["idx"])
+        n_entradas += 1
+
+    def mapa(k):
+        if k[0] == "dub":
+            return mapa_dub[id(k[1])]
+        if k[0] == "leg":
+            return mapa_leg[id(k[1])]
+        return "%d:%d" % (entrada_leg if fx[k[1]].tipo == "subtitle" else 0, k[1])
+
+    for tipo in TIPOS_ESCOLHIVEIS:
+        for k in itens[tipo]:
+            cmd += ["-map", mapa(k)]
+    cmd += ["-map", "0:t?", "-c", "copy"]                     # 0:t? = anexos do filme (fontes etc.)
+    for i, k in enumerate(itens["subtitle"]):
+        codec = k[1].codec if k[0] == "leg" else fx[k[1]].codec
+        if codec in LEGENDAS_PARA_SRT:                        # o MKV nao aceita: vira SRT (e texto, nada se perde)
+            cmd += ["-c:s:%d" % i, "srt"]
+    pa, pl = padroes_efetivos(itens, org)
+    for i, k in enumerate(itens["audio"]):
+        if k[0] == "dub":
+            cmd += ["-metadata:s:a:%d" % i, "language=%s" % (k[1].idioma or "und"),
+                    "-metadata:s:a:%d" % i, "title=%s" % k[1].nome]
+        cmd += ["-disposition:a:%d" % i, disposicao(film, k, k == pa, fx)]
+    for i, k in enumerate(itens["subtitle"]):
+        if k[0] == "leg":
+            cmd += ["-metadata:s:s:%d" % i, "language=%s" % (k[1].idioma or "und")]
+            if k[1].nome:
+                cmd += ["-metadata:s:s:%d" % i, "title=%s" % k[1].nome]
+        cmd += ["-disposition:s:%d" % i, disposicao(film, k, pl is not None and k == pl, fx)]
+    if itens["subtitle"] and suporta_default_mode(ferr):
+        cmd += ["-default_mode", "infer_no_subs"]
     if teste:
         cmd += ["-t", "300"]
     cmd.append(saida)
     return cmd
 
 
-TIPO_MKVMERGE = {"video": "video", "audio": "audio", "subtitle": "subtitles"}
-
-
-def _ids_mkvmerge(caminho, ferr):
-    """IDs das faixas no mkvmerge, por tipo, na ordem do arquivo (a mesma ordem do ffprobe)."""
-    p = subprocess.run([ferr.mkvmerge, "-J", caminho], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       creationflags=CRIAR_SEM_JANELA)
-    if p.returncode not in (0, 1):
-        raise RuntimeError(tr("O mkvmerge não conseguiu ler:\n%s\n%s") % (caminho, p.stderr.decode("utf-8", "replace")))
-    j = json.loads(p.stdout.decode("utf-8", "replace"))
-    ids = {"video": [], "audio": [], "subtitles": []}
-    for t in j.get("tracks", []):
-        if t.get("type") in ids:
-            ids[t["type"]].append(t["id"])
-    return ids
-
-
-def comando_mkvmerge(film, fontes, saida, teste, ferr, manter=None):
+def montar(film, dubs, saida, teste, ferr, msg, prog, cancelar=None, org=None, legendas=(), manter=None):
     """
-    mkvmerge: junta sem recodificar; atraso com --sync (negativo tambem funciona). Varias dublagens do
-    mesmo arquivo entram juntas (o arquivo e lido uma vez so).
-    """
-    ids_f = _ids_mkvmerge(film.caminho, ferr)
-    cmd = [ferr.mkvmerge, "--gui-mode", "-o", saida]
-    escolhidas = {"video": [], "audio": [], "subtitles": []}
-    for f in faixas_mantidas(film, manter):
-        tipo = TIPO_MKVMERGE[f.tipo]
-        if f.pos < len(ids_f[tipo]):
-            escolhidas[tipo].append(ids_f[tipo][f.pos])
-    for tipo, liga, desliga in (("video", "--video-tracks", "--no-video"), ("audio", "--audio-tracks", "--no-audio"),
-                                ("subtitles", "--subtitle-tracks", "--no-subtitles")):
-        if escolhidas[tipo]:
-            if len(escolhidas[tipo]) != len(ids_f[tipo]):
-                cmd += [liga, ",".join(str(i) for i in escolhidas[tipo])]
-        elif ids_f[tipo]:
-            cmd.append(desliga)
-    if any(f["d"].padrao for f in fontes):
-        for i in escolhidas["audio"]:
-            cmd += ["--default-track-flag", "%d:0" % i]
-    cmd.append(film.caminho)
-    grupos = {}
-    for f in fontes:
-        grupos.setdefault(os.path.abspath(f["src"]), []).append(f)
-    for src, itens in grupos.items():
-        ids = _ids_mkvmerge(src, ferr)["audio"]
-        try:   # o FFmpeg conta o tempo a partir do inicio de cada arquivo; o mkvmerge nao. Compensa a diferenca.
-            ajuste = int(round((_sondar_cache(src).inicio - film.inicio) * 1000))
-        except Exception:
-            ajuste = 0
-        escolhidos, opcoes = [], []
-        for f in itens:
-            if f["idx"] >= len(ids):
-                raise RuntimeError(tr("O mkvmerge não achou a faixa de áudio %d em %s") % (f["idx"], src))
-            tid, d = ids[f["idx"]], f["d"]
-            escolhidos.append(str(tid))
-            opcoes += ["--sync", "%d:%d" % (tid, f.get("atraso", d.atraso_ms) - ajuste),
-                       "--track-name", "%d:%s" % (tid, d.nome),
-                       "--language", "%d:%s" % (tid, d.idioma or "und"),
-                       "--default-track-flag", "%d:%d" % (tid, 1 if d.padrao else 0)]
-        cmd += ["--no-video", "--no-subtitles", "--no-chapters", "--no-attachments", "--no-global-tags",
-                "--no-track-tags", "--audio-tracks", ",".join(escolhidos)] + opcoes + [src]
-    if teste:
-        cmd[2:2] = ["--split", "parts:00:00:00-00:05:00"]     # antes do "-o"
-    return cmd
-
-
-def montar(film, dubs, saida, teste, motor, ferr, msg, prog, cancelar=None, manter=None):
-    """
-    Gera o MKV final. motor: 'mkvmerge' ou 'ffmpeg'. manter: indices das faixas do FILME que entram
-    (None = todas). Devolve o caminho do arquivo gerado.
+    Gera o MKV final com o FFmpeg (copia dos fluxos, sem recodificar), organizado por `org` (Organizacao;
+    None = faixas do filme na ordem original e dublagens depois dos audios do filme). `manter` so vale sem `org`.
+    Devolve o caminho do arquivo gerado.
     """
     cancelar = cancelar or threading.Event()
-    validar(film, dubs)
-    validar_manter(film, manter)
-    if teste and motor == "mkvmerge":          # o mkvmerge nao corta faixas FLAC (--split); o teste usa o FFmpeg
-        motor = "ffmpeg"
-    if motor == "mkvmerge" and not ferr.mkvmerge:
-        raise RuntimeError(tr("mkvmerge não encontrado. Escolha o FFmpeg ou indique o caminho em Opções."))
+    if org is None:          # sem organizacao: como nas versoes antigas (a dublagem marcada como padrao toca sozinha)
+        org = Organizacao(manter=manter, padrao_audio=next((("dub", d) for d in dubs if d.padrao), None))
+    legendas = list(legendas)
+    validar(film, dubs, legendas)
+    validar_manter(film, org.manter)
     tmp = tempfile.mkdtemp(prefix="eternaldub_")
     try:
         fontes = _preparar_dublagens(dubs, film, tmp, ferr, msg, prog, cancelar, teste)
+        legs = _preparar_legendas(legendas, tmp, msg)
         total = 300.0 if teste else max(film.duracao, 1.0)
         msg(tr("Montando o arquivo (só copia os fluxos, sem recodificar)..."))
+        cmd = comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar, org, legs)
 
-        if motor == "mkvmerge":
-            cmd = comando_mkvmerge(film, fontes, saida, teste, ferr, manter)
-
-            def ler(l):
-                m = re.search(r"(\d+)%", l)
-                if m:
-                    prog(min(99, int(m.group(1))))
-            _rodar(cmd, ler, tolerar=(0, 1), cancelar=cancelar)
-            if teste:                      # o mkvmerge acrescenta -001 ao nome
-                base, ext = os.path.splitext(saida)
-                achados = sorted(glob.glob(glob.escape(base) + "-*" + ext))
-                if achados:
-                    os.replace(achados[0], saida)
-                    for extra in achados[1:]:
-                        os.remove(extra)
-        else:
-            cmd = comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar, manter)
-
-            def ler(l):
-                if l.startswith("out_time="):
-                    prog(min(99, int(100 * _segundos(l[9:]) / total)))
-            _rodar(cmd, ler, cancelar=cancelar)
+        def ler(l):
+            if l.startswith("out_time="):
+                prog(min(99, int(100 * _segundos(l[9:]) / total)))
+        _rodar(cmd, ler, cancelar=cancelar)
         if not os.path.isfile(saida):
             raise RuntimeError(tr("O arquivo final não foi criado."))
         prog(100)
@@ -1279,32 +1641,26 @@ def _hashes(caminho, mapas, ferr, duracao=0.0, prog=None, cancelar=None):
             pass
 
 
-LETRA = {"video": "v", "audio": "a", "subtitle": "s"}
-
-
 def verificar_integridade(film, arquivo_final, ferr, msg, prog, cancelar=None, manter=None):
     """
-    Compara o hash de cada fluxo ORIGINAL do filme que foi mantido (video, audio, legenda) com o
-    fluxo correspondente no arquivo final. Le os dois arquivos inteiros.
+    Confere se cada fluxo ORIGINAL do filme que foi mantido (video, audio, legenda) esta no arquivo final
+    exatamente igual (mesmo hash), em qualquer posicao: a ordem das faixas pode ter mudado. Le os dois
+    arquivos inteiros.
     """
     mantidas = faixas_mantidas(film, manter)
-    mapas_f, mapas_s, nomes = [], [], []
-    for tipo, rot in (("video", tr("vídeo")), ("audio", tr("áudio")), ("subtitle", tr("legenda"))):
-        for pos_saida, f in enumerate(x for x in mantidas if x.tipo == tipo):
-            mapas_f.append("0:%s:%d" % (LETRA[tipo], f.pos))
-            mapas_s.append("0:%s:%d" % (LETRA[tipo], pos_saida))
-            nomes.append("%s %d (%s)" % (rot, f.pos + 1, f.rotulo()))
+    nomes = ["%s %d (%s)" % ({"video": tr("vídeo"), "audio": tr("áudio"), "subtitle": tr("legenda")}[f.tipo],
+                             f.pos + 1, f.rotulo()) for f in mantidas]
     msg(tr("Calculando o hash do filme original (lê o arquivo inteiro)..."))
-    h1 = _hashes(film.caminho, mapas_f, ferr, film.duracao, lambda f: prog(int(f * 50)), cancelar)
+    h1 = _hashes(film.caminho, ["0:%d" % f.idx for f in mantidas], ferr, film.duracao,
+                 lambda f: prog(int(f * 50)), cancelar)
+    final = sondar_arquivo(arquivo_final)
+    fluxos = [f for f in final.faixas if f.tipo in TIPOS_ESCOLHIVEIS]
     msg(tr("Calculando o hash do arquivo final..."))
-    h2 = _hashes(arquivo_final, mapas_s, ferr, film.duracao, lambda f: prog(50 + int(f * 50)), cancelar)
+    h2 = _hashes(arquivo_final, ["0:%d" % f.idx for f in fluxos], ferr, film.duracao,
+                 lambda f: prog(50 + int(f * 50)), cancelar)
     prog(100)
-    resultado = []
-    for i, nome in enumerate(nomes):
-        a = h1[i] if i < len(h1) else None
-        b = h2[i] if i < len(h2) else None
-        resultado.append((nome, a is not None and a == b))
-    return resultado
+    no_final = {(f.tipo, h) for f, h in zip(fluxos, h2)}
+    return [(nome, i < len(h1) and (f.tipo, h1[i]) in no_final) for i, (nome, f) in enumerate(zip(nomes, mantidas))]
 
 
 def _ler_janela_varias(caminho, posicoes, inicio, duracao, ferr, cancelar=None, limite_s=60.0):
@@ -1365,8 +1721,8 @@ def _entrelacamento(saida, inicio, duracao, ferr, esperadas=(), limite_s=60.0):
     try:
         p = subprocess.run([ferr.ffprobe, "-v", "error", "-read_intervals", "%.3f%%+%.3f" % (max(0.0, inicio), duracao),
                             "-show_entries", "packet=stream_index,codec_type,pts_time,dts_time,pos", "-of", "csv=p=0",
-                            saida], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=limite_s,
-                           creationflags=CRIAR_SEM_JANELA)
+                            saida], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                           timeout=limite_s, creationflags=CRIAR_SEM_JANELA)
     except (subprocess.TimeoutExpired, OSError):
         return {}
     pacotes = []
@@ -1399,10 +1755,12 @@ def _entrelacamento(saida, inicio, duracao, ferr, esperadas=(), limite_s=60.0):
     return pior
 
 
-def conferir_dublagens(saida, n_audios_filme, ref_saida, nomes, ferr, teste=False, cancelar=None, msg=None, prog=None):
+def conferir_dublagens(saida, posicoes, ref_saida, nomes, ferr, teste=False, cancelar=None, msg=None, prog=None):
     """
     Confere, DENTRO do arquivo gerado, se cada dublagem nova tem som e esta alinhada com o audio
     original (faixa `ref_saida` do arquivo gerado; None = so confere o som).
+      posicoes: posicoes das dublagens entre os audios do arquivo gerado (veja posicoes_para_conferencia);
+                um numero n (forma antiga) = todas as faixas de audio a partir da n.
     Le 2 ou 3 trechos curtos (cada leitura tem tempo maximo; nunca trava). Devolve, por dublagem:
       com_som: True / False / None (None = nao deu para conferir)
       sobra_ms: diferenca de sincronia medida (None = nao medida)
@@ -1418,7 +1776,8 @@ def conferir_dublagens(saida, n_audios_filme, ref_saida, nomes, ferr, teste=Fals
         dur = min(dur, arq.videos[0].duracao) if dur else arq.videos[0].duracao
     pontos = [45.0, 170.0] if teste else [dur * 0.15, dur * 0.5, dur * 0.85]
     pontos = [p for p in pontos if p + 30 < dur] or [max(0.0, dur / 3)]
-    novas = list(range(n_audios_filme, len(arq.audios)))
+    novas = list(range(posicoes, len(arq.audios))) if isinstance(posicoes, int) else \
+        [p for p in posicoes if p < len(arq.audios)]
     idx_fluxo = {f.pos: f.idx for f in arq.audios}
     res = {p: {"nome": nomes[i] if i < len(nomes) else tr("faixa %d") % p, "rms": 0.0, "atrasos": [], "lidos": 0,
                "sem_audio_em": [], "entrelacamento_s": None} for i, p in enumerate(novas)}

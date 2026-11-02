@@ -37,12 +37,12 @@ import subprocess
 import sys
 import threading
 import time
-from types import SimpleNamespace
 
 import numpy as np
 
 try:
-    from EternalDub_i18n import tr, N_, rot_conf, rot_metodo, definir as _definir_idioma, do_sistema as _idioma_sistema
+    from EternalDub_i18n import (tr, N_, rot_conf, rot_metodo, definir as _definir_idioma, do_sistema as _idioma_sistema,
+                                 disponiveis as _idiomas_disponiveis)
 except ImportError:                      # o detector tambem funciona sozinho, em portugues
     def tr(texto):
         return texto
@@ -50,9 +50,9 @@ except ImportError:                      # o detector tambem funciona sozinho, e
     def N_(texto):
         return texto
     rot_conf = rot_metodo = tr
-    _definir_idioma = _idioma_sistema = None
+    _definir_idioma = _idioma_sistema = _idiomas_disponiveis = None
 
-VERSAO_DETECTOR = "1.1"     # tem de ser igual a do EternalDub_core.py
+VERSAO_DETECTOR = "1.3"     # tem de ser igual a do EternalDub_core.py
 
 # ----------------------------------------------------------------- configuracao
 SR_AUDIO = 8000            # taxa de amostragem usada na analise de audio
@@ -185,7 +185,7 @@ def sondar(caminho):
         p = subprocess.run([FFPROBE, "-v", "error", "-show_entries",
                             "stream=index,codec_type,codec_name:stream_tags=language,title,DURATION:format=duration",
                             "-of", "json", caminho],
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_KW)
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, **_KW)
     except FileNotFoundError:
         raise SystemExit(tr("ERRO: ffprobe não encontrado. Instale o FFmpeg e tente de novo."))
     if p.returncode != 0:
@@ -1052,7 +1052,7 @@ def escolher_faixa_filme(info, pedido):
 
 
 def main():
-    if _definir_idioma:                   # idioma: --idioma pt|en, ou o do sistema
+    if _definir_idioma:                   # idioma: --idioma <codigo> (pt, en, es...), ou o do sistema
         pedido = None
         for i, a in enumerate(sys.argv):
             if a == "--idioma" and i + 1 < len(sys.argv):
@@ -1077,7 +1077,8 @@ def main():
                             "(para versões com cortes diferentes)"))
     ap.add_argument("--simples", action="store_true",
                     help=tr("relatório vai para a tela de erro; só linhas CHAVE=valor no resultado"))
-    ap.add_argument("--idioma", choices=["pt", "en"], help=tr("idioma das mensagens (padrão: o do sistema)"))
+    ap.add_argument("--idioma", choices=_idiomas_disponiveis() if _idiomas_disponiveis else ["pt", "en"],
+                    help=tr("idioma das mensagens (padrão: o do sistema)"))
     args = ap.parse_args()
 
     for s in (sys.stdout, sys.stderr):
