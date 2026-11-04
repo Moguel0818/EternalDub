@@ -4,7 +4,7 @@ import ast
 import os
 
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ARQUIVOS = ["EternalDub_gui.py", "EternalDub_core.py", "EternalDub_emendas.py", "EternalDub_audio.py",
+ARQUIVOS = ["EternalDub_gui.py", "EternalDub_core.py", "EternalDub_emendas.py", "EternalDub_audio.py", "EternalDub_musica.py",
             "EternalDub_i18n.py", "detectar_atraso.py"]
 # textos que nao precisam de traducao (nomes proprios, siglas, formatos)
 SEM_TRADUCAO = {"OK"}
