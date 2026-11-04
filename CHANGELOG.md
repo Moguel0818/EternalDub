@@ -1,5 +1,43 @@
 # Novidades / Changelog
 
+## 1.4
+
+**Português**
+
+- **Videoclipes: a música em alta qualidade no lugar do som ruim do clipe.** Novo botão **Adicionar música** (Ctrl+Shift+M): abra o videoclipe (captura de VHS, gravação de TV, vídeo da internet) como "filme" e escolha o FLAC, MP3, M4A, OGG ou WAV da mesma música. Arrastar o arquivo para a janela também funciona: arquivos com tags de artista ou álbum entram sozinhos como música (dá para trocar em **Tipo**). A faixa vem com o nome da música (tags) e o arquivo final fica no **padrão de videoclipe**: 1) a música (toca sozinha), 2) o som original do clipe. O arquivo sugerido termina em `_musica`.
+- **Medição feita para música.** Lê os dois arquivos inteiros (são curtos) e compara trechos do **clipe** com a música: onde o clipe não tem a música (falas, vinheta, silêncio depois do fim), o trecho simplesmente não conta. Tolerância de 25 ms e uma reta pelos trechos para achar a velocidade exata. Nos testes com som de fita simulado (mono, sem agudos, comprimido, com chiado e wow), o atraso sai com erro abaixo de 3 ms e a velocidade com erro abaixo de 0,005%. Acha diferenças pequenas de fita ou de placa de captura (0,1% a 2%) e as de quadros (NTSC, PAL).
+- **Velocidade corrigida "como fita".** A música é reamostrada em vez de passar pelo filtro atempo: o tom muda junto (0,1% = 1,7 cents, inaudível), o tempo fica exato (menos de 0,5 ms na música inteira; o atempo varia até ~13 ms) e o som não ganha artefatos. Quando as velocidades são diferentes, o EternalDub pergunta: **Corrigir como fita** (o recomendado para música) ou **Corrigir mantendo o tom** (o recomendado para falas, como antes).
+- **Começo e fim iguais aos do clipe.** O EternalDub mede como o clipe faz a música aparecer e sumir (fade-in, fade-out, corte seco, mesmo com o locutor da TV falando por cima) e a música em alta qualidade faz igual. O meio da música nunca é mexido. A onda laranja mostra o volume que vai ficar; dá para desligar (**Seguir o clipe no começo e no fim**) ou **Medir de novo**. As pontas são medidas sozinhas depois de detectar o atraso, e de novo ao gerar se a sincronia tiver mudado.
+- **A música termina junto com o vídeo** (nunca passa do fim da imagem).
+- Edições diferentes da música (um refrão a menos no clipe) usam a sincronia trecho por trecho, como nas dublagens.
+- Quando a música cabe no vídeo sem fades nem correção de velocidade, ela entra por **cópia exata** (o FLAC/MP3 original, sem recodificar). Senão, só ela vira FLAC (sem perdas).
+- **Capas embutidas** (a imagem do disco num FLAC/MP3, a miniatura num MP4) não viram mais uma segunda faixa de vídeo no arquivo final.
+- **Corrigido: atraso negativo por cópia exata.** Quando a dublagem começa antes do filme (atraso único, sem trechos nem correção de velocidade), a cópia só consegue cortar entre quadros de áudio, e a sobra era jogada fora: a dublagem ficava **adiantada até um quadro** (até ~90 ms em FLAC, 32 ms em AC3/E-AC3, 24 ms em MP3, 21 ms em AAC; por exemplo, -300 ms num FLAC saía -384 ms). Agora fica exato (até 0,5 ms). **Arquivos gerados com atraso negativo nesse modo devem ser gerados de novo.**
+- Arquivos curtos (menos de 4 min) vão direto para a análise completa, com trechos menores (antes a análise rápida recusava, e a completa usava trechos de 60 s).
+- O filtro de vídeos de **Abrir filme** aceita também `.mpg`, `.mpeg`, `.vob`, `.webm` e `.wmv`.
+- Linha de comando: `detectar_atraso.py CLIPE.mkv MUSICA.flac --musica`.
+- Projetos versão 6 (guardam o tipo da faixa, o modo de correção de velocidade e as pontas). Projetos antigos continuam abrindo.
+- O autoteste do `.exe` (`--autoteste`) e os testes do GitHub conferem também a parte de música.
+- Novo arquivo: `EternalDub_musica.py`.
+
+**English**
+
+- **Music videos: the high-quality song in place of the clip's poor sound.** New **Add music** button (Ctrl+Shift+M): open the music video (VHS capture, TV recording, web video) as the "movie" and choose the FLAC, MP3, M4A, OGG or WAV of the same song. Dragging the file onto the window also works: files with artist or album tags come in as music by themselves (you can switch it in **Type**). The track gets the song's name (tags) and the final file uses the **music video layout**: 1) the song (plays automatically), 2) the clip's original sound. The suggested file name ends in `_music`.
+- **Detection built for music.** It reads both files in full (they are short) and compares sections of the **clip** with the song: where the clip doesn't have the song (speech, station idents, silence after the end), that section simply doesn't count. 25 ms tolerance and a line through the sections to find the exact speed. In tests with simulated tape sound (mono, no treble, compressed, with hiss and wow), the delay comes out within 3 ms and the speed within 0.005%. It finds small tape or capture-card differences (0.1% to 2%) and frame-rate ones (NTSC, PAL).
+- **Speed corrected "like a tape".** The song is resampled instead of going through the atempo filter: the pitch changes with it (0.1% = 1.7 cents, inaudible), the timing is exact (under 0.5 ms across the whole song; atempo wanders up to ~13 ms) and the sound gets no artifacts. When the speeds differ, EternalDub asks: **Correct like a tape** (recommended for music) or **Correct keeping the pitch** (recommended for speech, as before).
+- **Start and end like the clip's.** EternalDub measures how the clip makes the song come in and go out (fade-in, fade-out, hard cut, even with the TV announcer talking over it) and the high-quality song does the same. The middle of the song is never touched. The orange waveform shows the volume it will have; you can turn it off (**Follow the clip at the start and the end**) or **Measure again**. The start and end are measured by themselves after detecting the delay, and again when making the file if the sync changed.
+- **The song ends together with the video** (never past the end of the picture).
+- Different edits of the song (one chorus less in the clip) use section-by-section sync, as with dubs.
+- When the song fits in the video with no fades and no speed correction, it goes in by **exact copy** (the original FLAC/MP3, not re-encoded). Otherwise only the song becomes FLAC (lossless).
+- **Embedded covers** (the album art in a FLAC/MP3, the thumbnail in an MP4) no longer become a second video track in the final file.
+- **Fixed: negative delay with exact copy.** When the dub starts before the movie (single delay, no sections or speed correction), a copy can only cut between audio frames, and the leftover was thrown away: the dub came out **early by up to one frame** (up to ~90 ms with FLAC, 32 ms with AC3/E-AC3, 24 ms with MP3, 21 ms with AAC; for example, -300 ms on a FLAC came out as -384 ms). It is now exact (within 0.5 ms). **Files made with a negative delay in this mode should be made again.**
+- Short files (under 4 min) go straight to the full analysis, with smaller sections (before, the quick analysis refused them and the full one used 60 s sections).
+- The **Open movie** video filter also accepts `.mpg`, `.mpeg`, `.vob`, `.webm` and `.wmv`.
+- Command line: `detectar_atraso.py CLIP.mkv SONG.flac --musica`.
+- Project version 6 (stores the track type, the speed correction mode and the start/end). Old projects still open.
+- The `.exe` self-test (`--autoteste`) and the GitHub tests also check the music part.
+- New file: `EternalDub_musica.py`.
+
 ## 1.3
 
 **Português**

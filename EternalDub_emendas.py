@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-VERSAO_EMENDAS = "1.3"
+VERSAO_EMENDAS = "1.4"
 
 MIN_TRECHO = 0.05        # s: menor trecho permitido entre duas emendas
 MIN_QUANTIA = 0.001      # s: quantia menor que isto = emenda sem efeito

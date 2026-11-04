@@ -13,6 +13,7 @@ Janela:
 
 O filme e montado SEM recodificar (copia dos fluxos).  Veja EternalDub_core.py.
 Edicao das emendas: EternalDub_emendas.py. Previa de audio: EternalDub_audio.py.
+Videoclipes (a musica em alta qualidade no lugar do som ruim do clipe): EternalDub_musica.py.
 Idiomas da interface: um arquivo .json por idioma na pasta idiomas/. Veja EternalDub_i18n.py.
 Requisitos: Python 3.9+, numpy, PySide6, FFmpeg.
 """
@@ -63,21 +64,23 @@ except ImportError:                     # sem o arquivo de idiomas: avisa (em po
 
 # Os arquivos .py do EternalDub precisam ser da MESMA versao. Se a pasta tiver arquivos misturados
 # (ex.: "EternalDub_core (1).py" baixado ao lado do antigo), o programa avisa logo ao abrir.
-VERSAO_ARQUIVOS = "1.3"
+VERSAO_ARQUIVOS = "1.4"
 ARQUIVOS = ("EternalDub_gui.py", "EternalDub_core.py", "EternalDub_emendas.py", "EternalDub_audio.py",
-            "EternalDub_i18n.py", "detectar_atraso.py")
-core = emendas = previa_audio = None
+            "EternalDub_musica.py", "EternalDub_i18n.py", "detectar_atraso.py")
+core = emendas = previa_audio = musica = None
 try:
     if i18n is None:
         raise ModuleNotFoundError("EternalDub_i18n", name="EternalDub_i18n")
     if getattr(i18n, "VERSAO_IDIOMAS", None) != VERSAO_ARQUIVOS:
         raise ImportError("EternalDub_i18n.py (%s) / EternalDub_gui.py (%s): %s" % (
             getattr(i18n, "VERSAO_IDIOMAS", "?"), VERSAO_ARQUIVOS, getattr(i18n, "__file__", "?")))
+    import EternalDub_musica as musica
     import EternalDub_core as core
     import EternalDub_emendas as emendas
     import EternalDub_audio as previa_audio
     ERRO_ARQUIVOS = None
-    for _mod, _attr in ((core, "VERSAO_NUCLEO"), (emendas, "VERSAO_EMENDAS"), (previa_audio, "VERSAO_AUDIO")):
+    for _mod, _attr in ((core, "VERSAO_NUCLEO"), (emendas, "VERSAO_EMENDAS"), (previa_audio, "VERSAO_AUDIO"),
+                        (musica, "VERSAO_MUSICA")):
         if getattr(_mod, _attr, None) != VERSAO_ARQUIVOS:
             ERRO_ARQUIVOS = "%s (%s) / EternalDub_gui.py (%s): %s" % (
                 os.path.basename(getattr(_mod, "__file__", "?")), getattr(_mod, _attr, "?"), VERSAO_ARQUIVOS,
@@ -87,7 +90,7 @@ except ModuleNotFoundError as _e:
     core = None
     ERRO_ARQUIVOS = ("falta o arquivo %s.py nesta pasta / missing file %s.py" % (_e.name, _e.name)
                      if _e.name in ("EternalDub_core", "EternalDub_emendas", "EternalDub_audio", "detectar_atraso",
-                                    "EternalDub_i18n") else str(_e))
+                                    "EternalDub_i18n", "EternalDub_musica") else str(_e))
 except Exception as _e:
     core = None
     ERRO_ARQUIVOS = str(_e)
@@ -343,6 +346,8 @@ class OndaWidget(QWidget):
         self.atraso = 0.0           # segundos
         self.atempo = 1.0
         self.trechos = None         # [[ini_filme, fim_filme, ini_dub], ...] (sincronia por trechos)
+        self.fades = (None, None)   # (fade_entrada, fade_saida) de uma musica: a onda laranja mostra o volume
+        self.limite_dub = None      # a musica para aqui (fim do video): depois disso a onda laranja some
         self.emendas = []           # [{"t", "silencio", "remocao", "som"}] ja com o ajuste fino somado
         self.emenda_sel = -1
         self.cabeca = None          # ponto de onde se ouve (s do filme)
@@ -385,6 +390,12 @@ class OndaWidget(QWidget):
             self.trechos = (t[:, 0], t[:, 1], t[:, 2])
         else:
             self.trechos = None
+        self.update()
+
+    def set_pontas(self, entrada=None, saida=None, limite=None):
+        """Fade-in/fade-out (tempo do filme) e o fim de uma musica: a onda laranja mostra o volume que vai ficar."""
+        self.fades = (entrada, saida)
+        self.limite_dub = limite
         self.update()
 
     def set_emendas(self, lista, selecionada=None):
@@ -448,7 +459,7 @@ class OndaWidget(QWidget):
         mx = np.maximum.reduceat(vmax, inter)[0::2]
         return mn, mx, ok
 
-    def _faixa(self, p, dados, escala, atraso, atempo, y0, h, cor, rotulo, trechos=None):
+    def _faixa(self, p, dados, escala, atraso, atempo, y0, h, cor, rotulo, trechos=None, fades=None, limite=None):
         w = self.width()
         p.fillRect(0, y0, w, h, QColor(22, 22, 22))
         p.setPen(QColor(50, 50, 50))
@@ -461,12 +472,20 @@ class OndaWidget(QWidget):
             return
         vmin, vmax, n = dados
         mn, mx, ok = self._extremos(vmin, vmax, n, atraso, atempo, w, trechos)
+        g = None
+        if fades and (fades[0] or fades[1]) or limite:          # musica: o volume das pontas e o fim do video
+            tt = self.t0 + (np.arange(w) + 0.5) / self.pps
+            g = musica.ganho_fades(tt, *(fades or (None, None)))
+            if limite:
+                g = np.where(tt < limite, g, 0.0)
+            ok = ok & (g > 0.002)
         p.setPen(cor)
         for x in range(w):
             if not ok[x]:
                 continue
-            ya = int(meio - float(mx[x]) * escala * amp)
-            yb = int(meio - float(mn[x]) * escala * amp)
+            k = float(g[x]) if g is not None else 1.0
+            ya = int(meio - float(mx[x]) * k * escala * amp)
+            yb = int(meio - float(mn[x]) * k * escala * amp)
             p.drawLine(x, ya, x, max(yb, ya + 1))
         p.setPen(QColor(220, 220, 220))
         p.drawText(8, y0 + 14, rotulo)
@@ -532,7 +551,7 @@ class OndaWidget(QWidget):
         else:
             rot = tr("%s   (atraso %+d ms)") % (self.rot_dub, int(round(self.atraso * 1000)))
         self._faixa(p, self.dub, self.escala_dub, self.atraso, self.atempo, self.TOPO + fh, fh,
-                    QColor(240, 160, 60), rot, self.trechos)
+                    QColor(240, 160, 60), rot, self.trechos, self.fades, self.limite_dub)
         self._regua(p, w)
         x0 = int((0 - self.t0) * self.pps)         # marca do tempo zero
         if 0 <= x0 < w:
@@ -811,7 +830,10 @@ class ReprodutorAudio(QObject):
 
 # ============================================================ desfazer / refazer
 class Historico:
-    """Pilha de estados de sincronia (atraso, velocidade e trechos) de uma dublagem, para Desfazer e Refazer."""
+    """
+    Pilha de estados de sincronia (atraso, velocidade, trechos e, numa musica, as pontas medidas no clipe) de uma
+    dublagem, para Desfazer e Refazer.
+    """
     LIMITE = 100
 
     def __init__(self):
@@ -819,11 +841,15 @@ class Historico:
 
     @staticmethod
     def estado(d):
-        return (d.atraso_ms, d.atempo, copy.deepcopy(d.trechos), d.status)
+        return (d.atraso_ms, d.atempo, copy.deepcopy(d.trechos), d.status, d.modo_velocidade,
+                copy.deepcopy(d.fade_entrada), copy.deepcopy(d.fade_saida), d.pontas_sinc)
 
     @staticmethod
     def aplicar(d, e):
         d.atraso_ms, d.atempo, d.trechos, d.status = e[0], e[1], copy.deepcopy(e[2]), e[3]
+        if len(e) > 4:
+            d.modo_velocidade, d.fade_entrada, d.fade_saida, d.pontas_sinc = \
+                e[4], copy.deepcopy(e[5]), copy.deepcopy(e[6]), e[7]
 
     def guardar(self, d):
         self.passado.append(self.estado(d))
@@ -853,6 +879,7 @@ class EscolherFaixas(QDialog):
         super().__init__(parent)
         legenda = tipo == "subtitle"
         self.setWindowTitle(tr("Quais legendas deste arquivo você quer adicionar?") if legenda else
+                            tr("Quais faixas deste arquivo você quer usar como música?") if tipo == "musica" else
                             tr("Quais faixas deste arquivo são dublagens?"))
         self.resize(560, 300)
         lay = QVBoxLayout(self)
@@ -1021,9 +1048,14 @@ class Janela(QMainWindow):
     def _criar_acoes(self):
         S = QStyle.StandardPixmap
         self.a_abrir = self._acao(tr("Abrir filme..."), self.acao_abrir_filme, "Ctrl+O", S.SP_DirOpenIcon,
-                                  tr("Escolha o filme de alta qualidade (.mkv)"))
+                                  tr("Escolha o vídeo que vai receber o áudio: o filme de alta qualidade (.mkv) ou o "
+                                     "videoclipe"))
         self.a_add = self._acao(tr("Adicionar dublagem..."), self.acao_adicionar, "Ctrl+D", S.SP_FileDialogNewFolder,
                                 tr("Adicione arquivos com dublagens (várias faixas de uma vez)"))
+        self.a_add_musica = self._acao(tr("Adicionar música..."), self.acao_adicionar_musica, "Ctrl+Shift+M",
+                                       S.SP_MediaVolume,
+                                       tr("Videoclipe: a música em alta qualidade (FLAC, MP3...) no lugar do som ruim do "
+                                          "clipe"))
         self.a_rem = self._acao(tr("Remover"), self.acao_remover, "Del", S.SP_TrashIcon)
         self.a_add_leg = self._acao(tr("Adicionar legenda..."), self.acao_add_legenda, "Ctrl+L",
                                     S.SP_FileDialogContentsView,
@@ -1040,6 +1072,10 @@ class Janela(QMainWindow):
         self.a_mapa = self._acao(tr("Sincronizar trecho por trecho..."), self.acao_mapear, "Ctrl+M", None,
                                  tr("Para versões com cortes diferentes: mede o atraso a cada segundo e monta a "
                                     "dublagem pedaço por pedaço"))
+        self.a_pontas = self._acao(tr("Medir as pontas da música no clipe (fade-in / fade-out)"), self.acao_pontas,
+                                   None, None,
+                                   tr("Mede como o clipe faz a música começar e terminar, para a música em alta qualidade "
+                                      "fazer igual"))
         self.a_zero = self._acao(tr("Zerar atraso, velocidade e trechos"), self.acao_zerar)
         self.a_teste = self._acao(tr("Gerar teste (5 min)"), lambda *_: self.acao_gerar(True), "F6", S.SP_DialogApplyButton,
                                   tr("Gera só os 5 primeiros minutos para conferir a sincronia"))
@@ -1098,12 +1134,12 @@ class Janela(QMainWindow):
         m.addSeparator()
         m.addAction(self.a_sair)
         m = mb.addMenu(tr("Dublagens"))
-        for a in (self.a_add, self.a_rem, self.a_sobe, self.a_desce):
+        for a in (self.a_add, self.a_add_musica, self.a_rem, self.a_sobe, self.a_desce):
             m.addAction(a)
         m.addSeparator()
         m.addAction(self.a_add_leg)
         m = mb.addMenu(tr("Sincronização"))
-        for a in (self.a_det, self.a_det_arq, self.a_det_completo, self.a_det_vid, self.a_mapa):
+        for a in (self.a_det, self.a_det_arq, self.a_det_completo, self.a_det_vid, self.a_mapa, self.a_pontas):
             m.addAction(a)
         m.addSeparator()
         for a in (self.a_desfazer, self.a_refazer, self.a_zero):
@@ -1148,7 +1184,7 @@ class Janela(QMainWindow):
         tb = QToolBar(tr("Principal"))
         tb.setMovable(False)
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        for a in (self.a_abrir, self.a_add, self.a_add_leg, self.a_rem):
+        for a in (self.a_abrir, self.a_add, self.a_add_musica, self.a_add_leg, self.a_rem):
             tb.addAction(a)
         tb.addSeparator()
         tb.addAction(self.a_det)
@@ -1219,6 +1255,22 @@ class Janela(QMainWindow):
         self.sp_atraso.valueChanged.connect(self._ed_atraso)
         self.chk_padrao = QCheckBox(tr("Faixa padrão (toca sozinha)"))
         self.chk_padrao.toggled.connect(self._ed_padrao)
+        self.cmb_tipo = QComboBox()
+        self.cmb_tipo.addItem(tr("Dublagem"), "dublagem")
+        self.cmb_tipo.addItem(tr("Música (videoclipe)"), "musica")
+        self.cmb_tipo.setToolTip(tr("Música: o FLAC/MP3 em alta qualidade no lugar do som ruim de um videoclipe (medição "
+                                    "mais exigente, velocidade corrigida como numa fita, termina junto com o vídeo e "
+                                    "segue o fade do clipe)"))
+        self.cmb_tipo.currentIndexChanged.connect(self._ed_tipo)
+        self.chk_pontas = QCheckBox(tr("Seguir o clipe no começo e no fim (fade-in / fade-out)"))
+        self.chk_pontas.setToolTip(tr("A música em alta qualidade aparece e some como no clipe (fade, corte seco ou "
+                                      "vinheta). O meio da música não é mexido."))
+        self.chk_pontas.toggled.connect(self._ed_pontas)
+        self.lbl_pontas = QLabel("-")
+        self.lbl_pontas.setWordWrap(True)
+        self.b_pontas = QPushButton(tr("Medir de novo"))
+        self.b_pontas.setToolTip(tr("Mede de novo as pontas no clipe, com a sincronia atual"))
+        self.b_pontas.clicked.connect(self.acao_pontas)
         self.lbl_origem = QLabel("-")
         self.lbl_origem.setWordWrap(True)
         self.lbl_vel = QLabel("-")
@@ -1237,10 +1289,25 @@ class Janela(QMainWindow):
             g.addWidget(b, 1, 2 + i)
             self.botoes_nudge.append(b)
         g.addWidget(self.chk_padrao, 2, 0, 1, 4)
+        g.addWidget(QLabel(tr("Tipo")), 2, 4)
+        g.addWidget(self.cmb_tipo, 2, 5, 1, 3)
         g.addWidget(QLabel(tr("Velocidade")), 3, 0)
         g.addWidget(self.lbl_vel, 3, 1, 1, 7)
         g.addWidget(QLabel(tr("Origem")), 4, 0)
         g.addWidget(self.lbl_origem, 4, 1, 1, 7)
+        self.lbl_pontas_tit = QLabel(tr("Pontas"))
+        caixa_pontas = QWidget()
+        lp = QVBoxLayout(caixa_pontas)
+        lp.setContentsMargins(0, 0, 0, 0)
+        linha_p = QHBoxLayout()
+        linha_p.addWidget(self.chk_pontas)
+        linha_p.addWidget(self.b_pontas)
+        linha_p.addStretch(1)
+        lp.addLayout(linha_p)
+        lp.addWidget(self.lbl_pontas)
+        self.caixa_pontas = caixa_pontas
+        g.addWidget(self.lbl_pontas_tit, 5, 0)
+        g.addWidget(caixa_pontas, 5, 1, 1, 7)
         linha = QHBoxLayout()
         self.b_det = QPushButton(tr("Detectar atraso (F5)"))
         self.b_det.clicked.connect(self.acao_detectar)
@@ -1254,7 +1321,7 @@ class Janela(QMainWindow):
         linha.addWidget(self.b_det2)
         linha.addWidget(self.b_mapa)
         linha.addStretch(1)
-        g.addLayout(linha, 5, 0, 1, 8)
+        g.addLayout(linha, 6, 0, 1, 8)
         self.editor = box
 
         esq = QWidget()
@@ -1523,12 +1590,25 @@ class Janela(QMainWindow):
 
     def _atualizar_estado(self):
         tem_film = self.film is not None
-        tem_dub = self._dub_atual() is not None
+        d_atual = self._dub_atual()
+        tem_dub = d_atual is not None
+        eh_musica = tem_dub and d_atual.eh_musica()
         ocupado = self._ocupado()
         self.a_add.setEnabled(tem_film and not ocupado)
+        self.a_add_musica.setEnabled(tem_film and not ocupado)
         self.a_det.setEnabled(tem_film and tem_dub and not ocupado)
         self.a_det_arq.setEnabled(tem_film and tem_dub and not ocupado)
-        self.a_det_vid.setEnabled(tem_film and tem_dub and not ocupado)
+        self.a_det_vid.setEnabled(tem_film and tem_dub and not ocupado and not eh_musica)
+        self.a_pontas.setEnabled(tem_film and eh_musica and not ocupado)
+        for w in (self.lbl_pontas_tit, self.caixa_pontas):
+            w.setVisible(eh_musica)
+        self.b_pontas.setEnabled(tem_film and eh_musica and not ocupado and d_atual.seguir_pontas)
+        self.editor.setTitle(tr("Música selecionada") if eh_musica else tr("Dublagem selecionada"))
+        tem_musica = any(x.eh_musica() for x in self.dubs)
+        self.b_padrao_saida.setText(tr("Aplicar o padrão de videoclipe") if tem_musica else
+                                    tr("Aplicar o padrão BDRemux PT-BR"))
+        self.chk_org_auto.setText(tr("Organizar sozinho no padrão de videoclipe") if tem_musica else
+                                  tr("Organizar sozinho no padrão BDRemux PT-BR"))
         self.a_det_completo.setEnabled(tem_film and tem_dub and not ocupado)
         self.a_mapa.setEnabled(tem_film and tem_dub and not ocupado)
         self.b_det.setEnabled(tem_film and tem_dub and not ocupado)
@@ -1758,7 +1838,8 @@ class Janela(QMainWindow):
     def acao_abrir_filme(self, *_):
         pasta = self.cfg.value("pasta", "")
         caminho, _ = QFileDialog.getOpenFileName(
-            self, tr("Abrir filme"), pasta, tr("Vídeos (*.mkv *.mp4 *.m2ts *.ts *.avi *.mov);;Todos os arquivos (*)"))
+            self, tr("Abrir filme"), pasta,
+            tr("Vídeos (*.mkv *.mp4 *.m2ts *.ts *.avi *.mov *.mpg *.mpeg *.vob *.webm *.wmv);;Todos os arquivos (*)"))
         if caminho:
             self._carregar_filme(os.path.normpath(caminho))
 
@@ -1794,8 +1875,8 @@ class Janela(QMainWindow):
 
     # ------------------------------------------------ arquivo final (ordem, o que entra, faixa padrao)
     def _novo_filme_na_saida(self):
-        """Filme novo: tudo marcado na ordem do arquivo, ou o padrao BDRemux PT-BR se estiver ligado."""
-        self.manter = set(f.idx for f in self.film.faixas if f.tipo in core.TIPOS_ESCOLHIVEIS)
+        """Filme novo: tudo marcado na ordem do arquivo (menos capas embutidas), ou o padrao, se estiver ligado."""
+        self.manter = core.faixas_padrao(self.film)
         self.ordem, self.padrao_audio, self.padrao_legenda = [], None, None
         self._org_manual = False
         self._idioma_original = ""
@@ -1830,7 +1911,10 @@ class Janela(QMainWindow):
         self.ordem, self.manter = org.ordem, set(org.manter)
         self.padrao_audio = self.padrao_legenda = None
         self._org_manual = False
-        self.log(tr("Arquivo final no padrão BDRemux PT-BR: áudio PT-BR, áudio original, legenda PT-BR."))
+        if any(d.eh_musica() for d in self.dubs):
+            self.log(tr("Arquivo final no padrão de videoclipe: a música (padrão), depois o som original do clipe."))
+        else:
+            self.log(tr("Arquivo final no padrão BDRemux PT-BR: áudio PT-BR, áudio original, legenda PT-BR."))
         self._depois_de_mudar_saida()
 
     def _ao_mudar_org_auto(self, ligado):
@@ -1914,13 +1998,13 @@ class Janela(QMainWindow):
                         (" → SRT" if f.codec in core.LEGENDAS_PARA_SRT else "")
                     idioma, titulo = f.idioma, f.titulo
                     marcas = [self._nome_marca(m) for m in ("forced", "comment", "hearing_impaired",
-                                                            "visual_impaired") if f.disposicao.get(m)]
+                                                            "visual_impaired", "attached_pic") if f.disposicao.get(m)]
                 elif k[0] == "dub":
                     d = k[1]
                     manter.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsSelectable)
                     manter.setToolTip(tr("Dublagens e legendas adicionadas sempre entram (para tirar, remova da lista)"))
-                    origem = tr("dublagem: %s") % os.path.basename(d.arquivo)
-                    codec = "FLAC" if (d.trechos or abs(d.atempo - 1.0) > 1e-9) else (d.detalhe.split(" | ")[0])
+                    origem = (tr("música: %s") if d.eh_musica() else tr("dublagem: %s")) % os.path.basename(d.arquivo)
+                    codec = "FLAC" if core.vai_virar_flac(d, self.film) else (d.detalhe.split(" | ")[0])
                     idioma, titulo, marcas = d.idioma, d.nome, []
                 else:
                     x = k[1]
@@ -2011,8 +2095,8 @@ class Janela(QMainWindow):
     def _marcar_saida(self, tudo):
         if not self.film:
             return
-        self.manter = set(f.idx for f in self.film.faixas
-                          if f.tipo in core.TIPOS_ESCOLHIVEIS and (tudo or f.tipo == "video"))
+        self.manter = core.faixas_padrao(self.film) if tudo else \
+            set(f.idx for f in (self.film.imagens or self.film.videos))
         self._organizou_a_mao()
         self._depois_de_mudar_saida()
 
@@ -2175,9 +2259,29 @@ class Janela(QMainWindow):
             tr("Áudio/vídeo (*.mkv *.mka *.mp4 *.m4a *.mp3 *.ac3 *.eac3 *.dts *.flac *.wav *.aac *.ogg *.m2ts)"
                ";;Todos os arquivos (*)"))
         if caminhos:
-            self._adicionar_arquivos([os.path.normpath(c) for c in caminhos])
+            self._adicionar_arquivos([os.path.normpath(c) for c in caminhos], como_musica=False)
 
-    def _adicionar_arquivos(self, caminhos):
+    def acao_adicionar_musica(self, *_):
+        pasta = self.cfg.value("pasta", "")
+        caminhos, _ = QFileDialog.getOpenFileNames(
+            self, tr("Adicionar música (videoclipe)"), pasta,
+            tr("Músicas (*.flac *.mp3 *.m4a *.aac *.ogg *.opus *.wav *.aif *.aiff *.wv *.ape *.alac *.wma *.mka)"
+               ";;Todos os arquivos (*)"))
+        if caminhos:
+            self._adicionar_arquivos([os.path.normpath(c) for c in caminhos], como_musica=True)
+
+    def _idioma_da_musica(self, f):
+        """Idioma de uma musica: o da propria faixa, se tiver; senao o do som do clipe; senao 'und'."""
+        if len(f.idioma) == 3 and f.idioma not in ("und", "zxx", "mul"):
+            return f.idioma
+        try:
+            ref = self.film.audios[self._ref_pos()].idioma
+        except (AttributeError, IndexError):
+            ref = ""
+        return ref if len(ref) == 3 and ref not in ("und", "zxx", "mul") else "und"
+
+    def _adicionar_arquivos(self, caminhos, como_musica=None):
+        """como_musica: True = entra como musica (videoclipe); False = como dublagem; None = descobre por arquivo."""
         if not self.film:
             self.aviso(tr("Abra primeiro o filme de alta qualidade."))
             return
@@ -2194,10 +2298,11 @@ class Janela(QMainWindow):
                 continue
             self.cfg.setValue("pasta", os.path.dirname(c))
             self._arquivos[c] = arq
+            eh_musica = como_musica if como_musica is not None else musica.parece_musica(arq, self.film)
             if len(arq.audios) == 1:
                 escolhidas = [0]
             else:
-                dlg = EscolherFaixas(arq, idiomas_filme, self)
+                dlg = EscolherFaixas(arq, idiomas_filme, self, tipo="musica" if eh_musica else "audio")
                 if not dlg.exec():
                     continue
                 escolhidas = dlg.escolhidas()
@@ -2205,14 +2310,32 @@ class Janela(QMainWindow):
                 f = arq.audios[pos]
                 if any(d.chave() == (os.path.abspath(c), pos) for d in self.dubs):
                     continue
-                idioma = f.idioma if len(f.idioma) == 3 else ("por" if i18n.atual() == "pt" else "und")
-                novas.append(core.Dublagem(arquivo=c, faixa=pos, nome=core.nome_sugerido(f.titulo, tr("Dublagem PT-BR")),
-                                           idioma=idioma, detalhe=f.rotulo()))
+                if eh_musica:
+                    d = core.Dublagem(arquivo=c, faixa=pos, nome=musica.nome_da_musica(arq, tr("Música")),
+                                      idioma=self._idioma_da_musica(f), detalhe=f.rotulo(), tipo="musica",
+                                      modo_velocidade="fita")
+                    if como_musica is None:
+                        self.log(tr("%s parece ser a música de um videoclipe: entrou como música (dá para mudar em "
+                                    "Tipo).") % os.path.basename(c))
+                else:
+                    idioma = f.idioma if len(f.idioma) == 3 else ("por" if i18n.atual() == "pt" else "und")
+                    d = core.Dublagem(arquivo=c, faixa=pos, nome=core.nome_sugerido(f.titulo, tr("Dublagem PT-BR")),
+                                      idioma=idioma, detalhe=f.rotulo())
+                novas.append(d)
         if novas:
             self.dubs.extend(novas)
-            self.log(tr("%d dublagem(ns) adicionada(s).") % len(novas))
-            self._organizar_auto()
+            n_mus = sum(1 for d in novas if d.eh_musica())
+            if n_mus:
+                self.log(tr("%d música(s) adicionada(s). Agora: Detectar atraso (F5).") % n_mus)
+            if len(novas) - n_mus:
+                self.log(tr("%d dublagem(ns) adicionada(s).") % (len(novas) - n_mus))
+            self._reorganizar()
             self._refresh_tabela(len(self.dubs) - len(novas))
+
+    def _reorganizar(self):
+        """Depois de entrar (ou mudar de tipo) uma faixa: o padrao automatico, ou ao menos as musicas na frente."""
+        if not self._organizar_auto() and self.film and not self._org_manual and any(d.eh_musica() for d in self.dubs):
+            self.ordem = core.musicas_primeiro(self.film, self.dubs, self.legendas, self.ordem)
 
     def _dub_atual(self):
         r = self.tab.currentRow() if hasattr(self, "tab") else -1
@@ -2250,18 +2373,17 @@ class Janela(QMainWindow):
             self.ed_idioma.setText(d.idioma)
             self.sp_atraso.setValue(d.atraso_ms)
             self.chk_padrao.setChecked(self._eh_padrao(d))
+            self.cmb_tipo.setCurrentIndex(max(0, self.cmb_tipo.findData(d.tipo)))
+            self.chk_pontas.setChecked(bool(d.seguir_pontas))
             self.lbl_origem.setText(tr("%s  -  faixa %d  (%s)") % (d.arquivo, d.faixa, d.detalhe))
-            txt = tr("normal") if abs(d.atempo - 1.0) < 1e-9 else \
-                tr("corrigida (atempo=%.6f; só esta dublagem será convertida para FLAC)") % d.atempo
-            if d.trechos:
-                txt += "   |   " + tr("sincronia por trechos: %d trechos (o Atraso acima é um ajuste fino somado a "
-                                       "todos; só esta dublagem vira FLAC)") % len(d.trechos)
-            self.lbl_vel.setText(txt)
+            self.lbl_vel.setText(self._texto_velocidade(d))
+            self.lbl_pontas.setText(self._texto_pontas(d))
         else:
             self.ed_nome.clear()
             self.ed_idioma.clear()
             self.lbl_origem.setText("-")
             self.lbl_vel.setText("-")
+            self.lbl_pontas.setText("-")
         self._carregando = False
         if id(d) != getattr(self, "_dub_do_painel", None):
             self.onda.emenda_sel = -1                         # outra dublagem: a emenda escolhida deixa de valer
@@ -2269,10 +2391,53 @@ class Janela(QMainWindow):
         self._atualizar_estado()
         if d:
             self.onda.set_atraso(d.atraso_ms, d.atempo, d.trechos)
+            self._mostrar_pontas_na_onda(d)
             self._carregar_onda_dub(d)
         else:
             self.onda.set_dub(None)
+            self.onda.set_pontas()
         self._atualizar_painel_emendas()
+
+    def _texto_velocidade(self, d):
+        """Texto da linha 'Velocidade' do editor."""
+        if abs(d.atempo - 1.0) < 1e-9:
+            txt = tr("normal")
+        elif d.modo_velocidade == "fita":
+            txt = tr("corrigida como fita (x%.5f; o tom muda %+.1f cents; só esta faixa vira FLAC)") % (
+                1.0 / d.atempo, musica.cents(d.atempo))
+        else:
+            txt = tr("corrigida (atempo=%.6f; só esta dublagem será convertida para FLAC)") % d.atempo
+        if d.trechos:
+            txt += "   |   " + tr("sincronia por trechos: %d trechos (o Atraso acima é um ajuste fino somado a "
+                                   "todos; só esta dublagem vira FLAC)") % len(d.trechos)
+        if d.eh_musica() and self.film:
+            txt += "   |   " + tr("termina junto com o vídeo (%s)") % fmt_tempo_ms(core.limite_da_faixa(d, self.film))
+        return txt
+
+    def _texto_pontas(self, d):
+        """Texto das pontas (fade-in / fade-out) de uma musica, para o editor."""
+        if not d.eh_musica():
+            return "-"
+        if not d.seguir_pontas:
+            return tr("Desligado: a música começa e termina como no arquivo dela (e para no fim do vídeo).")
+        if not d.pontas_sinc:
+            return tr("Ainda não medidas (são medidas sozinhas depois de detectar o atraso, ou ao gerar o arquivo).")
+        partes = []
+        if d.fade_entrada:
+            partes.append(tr("começo: %s") % musica.descrever_fade(d.fade_entrada, fmt_tempo_ms))
+        if d.fade_saida:
+            partes.append(tr("fim: %s") % musica.descrever_fade(d.fade_saida, fmt_tempo_ms))
+        txt = "; ".join(partes) if partes else tr("o clipe não faz fade: a música entra e sai inteira")
+        if core.pontas_desatualizadas(d):
+            txt += "  " + tr("(medidas com outra sincronia: clique em Medir de novo, ou serão medidas ao gerar)")
+        return txt
+
+    def _mostrar_pontas_na_onda(self, d):
+        if d is not None and d.eh_musica() and self.film:
+            self.onda.set_pontas(d.fade_entrada if d.seguir_pontas else None,
+                                 d.fade_saida if d.seguir_pontas else None, core.limite_da_faixa(d, self.film))
+        else:
+            self.onda.set_pontas()
 
     def _carregar_onda_dub(self, d):
         chave = (d.arquivo, d.faixa)
@@ -2319,6 +2484,8 @@ class Janela(QMainWindow):
         if d:
             self._guardar_historico(d, "zerar", forcar=True)
             d.atraso_ms, d.atempo, d.status, d.trechos = 0, 1.0, "", None
+            d.fade_entrada = d.fade_saida = None            # (as pontas dependem da sincronia)
+            d.pontas_sinc = ""
             self._refresh_tabela()
 
     # ------------------------------------------------ editor
@@ -2334,6 +2501,68 @@ class Janela(QMainWindow):
         if d and not self._carregando:
             d.idioma = texto.strip().lower()
             self._mudou_a_lista()
+
+    def _ed_tipo(self, *_):
+        d = self._dub_atual()
+        if d is None or self._carregando:
+            return
+        tipo = self.cmb_tipo.currentData()
+        if tipo == d.tipo:
+            return
+        d.tipo = tipo
+        if tipo == "musica" and abs(d.atempo - 1.0) < 1e-9:
+            d.modo_velocidade = "fita"                       # (uma velocidade ja corrigida continua como estava)
+        self.log(tr("%s agora é uma música (videoclipe).") % d.nome if tipo == "musica" else
+                 tr("%s agora é uma dublagem.") % d.nome)
+        self._reorganizar()
+        self._refresh_tabela()
+
+    def _ed_pontas(self, marcado):
+        d = self._dub_atual()
+        if d is None or self._carregando:
+            return
+        d.seguir_pontas = bool(marcado)
+        if marcado and core.pontas_desatualizadas(d) and self.film:
+            self.acao_pontas()
+        self._refresh_tabela()
+
+    def acao_pontas(self, *_):
+        """Mede no clipe como a musica selecionada comeca e termina (fade-in, fade-out, corte)."""
+        d = self._dub_atual()
+        if d is None or not d.eh_musica() or not self.film:
+            return
+        if not d.seguir_pontas:
+            d.seguir_pontas = True
+        self._medir_pontas(d)
+
+    def _medir_pontas(self, d):
+        """Tarefa: mede as pontas com uma copia da sincronia atual e aplica se ela nao tiver mudado no meio tempo."""
+        film, ref, copia = self.film, self._ref_pos(), copy.deepcopy(d)
+
+        def job(msg, prog, cancelar):
+            return core.medir_pontas(film, ref, copia, cancelar, msg, prog)
+
+        def pronto(res):
+            if d not in self.dubs:
+                return
+            if core.assinatura_sinc(d) != res.get("sinc"):
+                self.log(tr("A sincronia mudou enquanto as pontas eram medidas: meça de novo (ou elas serão medidas ao "
+                            "gerar o arquivo)."))
+                return
+            antes = Historico.estado(d)
+            core.aplicar_pontas(d, res)
+            self._guardar_historico(d, "pontas", antes, forcar=True)
+            self.log(self._resumo_pontas(d, res))
+            self._refresh_tabela()
+        self._submeter(tr("Medindo as pontas da música no clipe"), job, pronto)
+
+    def _resumo_pontas(self, d, res):
+        if not res.get("ok"):
+            motivo = {"nao_bate": tr("o som do clipe e a música não batem o bastante (a sincronia está certa?)"),
+                      "sem_musica": tr("quase nada da música cai dentro do clipe"),
+                      "curto": tr("áudio curto demais")}.get(res.get("motivo"), res.get("motivo") or "?")
+            return tr("Pontas de %s: não deu para medir (%s). A música fica sem fade.") % (d.nome, motivo)
+        return tr("Pontas de %s: %s") % (d.nome, self._texto_pontas(d))
 
     def _ed_atraso(self, valor):
         d = self._dub_atual()
@@ -2373,11 +2602,12 @@ class Janela(QMainWindow):
         d = self._dub_atual()
         if not (self.film and d) or self._ocupado():
             return
-        caminho, ref = self.film.caminho, self._ref_pos()
+        caminho, ref, mus = self.film.caminho, self._ref_pos(), d.eh_musica()
 
         def job(msg, prog, cancelar):
-            return core.detectar(caminho, ref, d.arquivo, d.faixa, cancelar, msg, prog)
-        self._submeter(tr("Detectando o atraso (análise rápida: lê só trechos do filme)"), job,
+            return core.detectar(caminho, ref, d.arquivo, d.faixa, cancelar, msg, prog, musica=mus)
+        self._submeter(tr("Detectando o atraso da música (lê o clipe e a música inteiros)") if mus else
+                       tr("Detectando o atraso (análise rápida: lê só trechos do filme)"), job,
                        lambda r: self._aplicar_resultado([d], r, (d.arquivo, d.faixa)))
 
     def acao_detectar_faixa_arquivo(self, *_):
@@ -2399,16 +2629,19 @@ class Janela(QMainWindow):
             return
         pos = int(item.split(":")[0])
         alvos = [x for x in self.dubs if os.path.abspath(x.arquivo) == os.path.abspath(d.arquivo)]
-        caminho, ref, origem = self.film.caminho, self._ref_pos(), d.arquivo
+        caminho, ref, origem, mus = self.film.caminho, self._ref_pos(), d.arquivo, d.eh_musica()
 
         def job(msg, prog, cancelar):
-            return core.detectar(caminho, ref, origem, pos, cancelar, msg, prog)
+            return core.detectar(caminho, ref, origem, pos, cancelar, msg, prog, musica=mus)
         self._submeter(tr("Detectando o atraso (faixa %d do arquivo)") % pos, job,
                        lambda r: self._aplicar_resultado(alvos, r, (origem, pos)))
 
     def acao_detectar_completo(self, *_):
         d = self._dub_atual()
         if not (self.film and d) or self._ocupado():
+            return
+        if d.eh_musica():                       # a musica ja e medida lendo os dois arquivos inteiros
+            self.acao_detectar()
             return
         try:
             gb = os.path.getsize(self.film.caminho) / 1e9
@@ -2454,15 +2687,25 @@ class Janela(QMainWindow):
         if r.get("modo") == "rapido" and r.get("lido_filme_s"):
             self.log(tr("Análise rápida: leu só %s do filme e %s da dublagem (trechos espalhados).")
                      % (fmt_tempo(r["lido_filme_s"]), fmt_tempo(r["lido_dub_s"] or 0)))
-        if r.get("falhas"):
+        if r.get("falhas") and r.get("musica"):
+            self.log(tr("Trechos do clipe sem a música (falas, vinheta, silêncio depois do fim): perto de %s.")
+                     % ", ".join(fmt_tempo(t) for t in r["falhas"][:12]))
+        elif r.get("falhas"):
             self.log(tr("Obs.: não achei a dublagem perto de %s do filme (cena sem música/efeitos, ou diferente?).")
                      % ", ".join(fmt_tempo(t) for t in r["falhas"]))
+        mus = all(a.eh_musica() for a in alvos)
         if st == "BAIXA_CONFIANCA" or conf == "BAIXA":
             for a in alvos:
                 a.status = tr("sem correspondência confiável")
             self._refresh_tabela()
             if r.get("motivo"):
                 self.log(tr("Análise rápida: %s") % r["motivo"])
+            if mus:
+                self.aviso(tr("Não encontrei a música no som do clipe.\n\nConfira se é a mesma gravação (o clipe pode "
+                              "usar outra versão: ao vivo, remix, edição de rádio) e se a faixa de referência é a do "
+                              "som do clipe (aba Arquivo final). Também dá para arrastar a faixa laranja na onda para "
+                              "alinhar na mão."))
+                return
             self.aviso(tr("Não encontrei uma correspondência confiável entre a dublagem e o filme.\n\n"
                           "Opções (menu Sincronização):\n"
                           " - 'Detectar usando outra faixa do arquivo' (ex.: a faixa em inglês da mesma fonte);\n"
@@ -2476,23 +2719,14 @@ class Janela(QMainWindow):
                 a.atraso_ms, a.atempo, a.trechos = r["atraso_ms"], 1.0, None
                 a.status = tr("detectado: %s, confiança %s") % (rot_metodo(r["metodo"]), rot_conf(conf))
         elif st in ("VELOCIDADE", "DERIVA"):
-            if st == "VELOCIDADE":
-                motivo = tr(r["descricao_velocidade"])
-            else:
-                motivo = tr("o atraso muda %.2f s por hora (velocidades um pouco diferentes)") % \
-                    abs(r["deriva_s_por_hora"])
-            resp = QMessageBox.question(
-                self, NOME_APP,
-                tr("A dublagem e o filme têm VELOCIDADES diferentes:\n%s.\n\nCorrigir a velocidade? Ao gerar o "
-                   "arquivo, SOMENTE a dublagem será convertida para FLAC (o vídeo não é tocado).\n\n"
-                   "Atraso depois da correção: %+d ms") % (motivo, r["atraso_ms"]),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            sim = resp == QMessageBox.StandardButton.Yes
+            modo = self._perguntar_velocidade(r, mus)
             for a in alvos:
                 self._guardar_historico(a, "deteccao", forcar=True)
                 a.atraso_ms, a.trechos = r["atraso_ms"], None
-                a.atempo = r["atempo"] if sim else 1.0
-                a.status = (tr("velocidade corrigida (x%.4f), confiança %s") % (1 / r["atempo"], rot_conf(conf)) if sim
+                a.atempo = r["atempo"] if modo else 1.0
+                if modo:
+                    a.modo_velocidade = modo
+                a.status = (tr("velocidade corrigida (x%.4f), confiança %s") % (1 / r["atempo"], rot_conf(conf)) if modo
                             else tr("velocidade DIFERENTE, confiança %s") % rot_conf(conf))
         else:                                       # CORTES
             linhas = [tr("de %s a %s: %+d ms") % (fmt_tempo(g["ini"]), fmt_tempo(g["fim"]), g["atraso_ms"])
@@ -2506,6 +2740,11 @@ class Janela(QMainWindow):
             box.setWindowTitle(NOME_APP)
             box.setText(cab + "\n\n" + "\n".join(linhas[:12]))
             box.setInformativeText(
+                tr("O clipe usa uma edição diferente da música (por exemplo, um refrão a menos ou uma pausa a mais).\n\n"
+                   "Sincronizar trecho por trecho (recomendado): o EternalDub mede o atraso a cada segundo e monta a "
+                   "música pedaço por pedaço, como o clipe. Onde a música não tem um pedaço do clipe entra silêncio; "
+                   "onde ela tem algo que o clipe não tem, esse pedaço sai. Só a música vira FLAC (sem perdas); o "
+                   "vídeo não é tocado.") if mus else
                 tr("Um único atraso deixa parte das falas fora do lugar.\n\n"
                    "Sincronizar trecho por trecho (recomendado): o EternalDub mede o atraso a cada segundo e monta a "
                    "dublagem pedaço por pedaço. Onde a dublagem não tem um pedaço do filme entra silêncio; onde ela "
@@ -2526,7 +2765,59 @@ class Janela(QMainWindow):
                 arq, faixa = medida or (alvos[0].arquivo, alvos[0].faixa)
                 self._iniciar_mapa(alvos, arq, faixa, r.get("atempo", 1.0), r["atraso_ms"],
                                    [g["atraso_ms"] for g in r["grupos"]])
+                self._refresh_tabela()
+                return                                  # as pontas sao medidas depois do mapa
+            else:
+                self._refresh_tabela()
+                return
         self._refresh_tabela()
+        for a in alvos:                                 # musica: agora que esta no lugar, mede as pontas no clipe
+            if a.eh_musica() and a.seguir_pontas:
+                self._medir_pontas(a)
+
+    def _medir_pontas_das(self, alvos):
+        for a in alvos:
+            if a.eh_musica() and a.seguir_pontas:
+                self._medir_pontas(a)
+
+    def _perguntar_velocidade(self, r, mus):
+        """
+        Velocidades diferentes: pergunta como corrigir. Devolve 'fita' (reamostra: o tom acompanha), 'tempo' (atempo:
+        o tom nao muda) ou None (nao corrigir). Musica: 'fita' e o recomendado; dublagem: 'tempo' (como antes).
+        """
+        rr = 1.0 / r["atempo"]
+        if mus:
+            motivo = (tr("a música toca %.3f%% mais rápido que no clipe") if rr > 1 else
+                      tr("a música toca %.3f%% mais devagar que no clipe")) % (abs(rr - 1.0) * 100.0)
+            texto = tr("A música e o clipe têm VELOCIDADES diferentes:\n%s.\n\nCorrigir a velocidade? Ao gerar o "
+                       "arquivo, SOMENTE a música será convertida para FLAC (o vídeo não é tocado).\n\n"
+                       "Atraso depois da correção: %+d ms") % (motivo, r["atraso_ms"])
+        else:
+            if r["status"] == "VELOCIDADE":
+                motivo = tr(r["descricao_velocidade"])
+            else:
+                motivo = tr("o atraso muda %.2f s por hora (velocidades um pouco diferentes)") % \
+                    abs(r["deriva_s_por_hora"])
+            texto = tr("A dublagem e o filme têm VELOCIDADES diferentes:\n%s.\n\nCorrigir a velocidade? Ao gerar o "
+                       "arquivo, SOMENTE a dublagem será convertida para FLAC (o vídeo não é tocado).\n\n"
+                       "Atraso depois da correção: %+d ms") % (motivo, r["atraso_ms"])
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(NOME_APP)
+        box.setText(texto)
+        box.setInformativeText(
+            tr("Como fita: a faixa é reamostrada, como uma fita tocando um pouco mais rápido ou mais devagar. O tom "
+               "muda junto (aqui %+.1f cents; 100 cents = 1 semitom), o tempo fica exato e o som não ganha nenhum "
+               "artefato.\nMantendo o tom: o filtro atempo estica o som sem mudar o tom. Ótimo para falas; em música "
+               "sustentada pode deixar o som levemente \"aguado\".") % musica.cents(r["atempo"]))
+        b_fita = box.addButton(tr("Corrigir como fita (recomendado para música)") if mus else
+                               tr("Corrigir como fita (o tom acompanha)"), QMessageBox.ButtonRole.AcceptRole)
+        b_tom = box.addButton(tr("Corrigir mantendo o tom") if mus else
+                              tr("Corrigir mantendo o tom (recomendado para falas)"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(tr("Não corrigir"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_fita if mus else b_tom)
+        box.exec()
+        return "fita" if box.clickedButton() is b_fita else ("tempo" if box.clickedButton() is b_tom else None)
 
     # ------------------------------------------------ sincronia por trechos
     def acao_mapear(self, *_):
@@ -2571,8 +2862,11 @@ class Janela(QMainWindow):
             if r != QMessageBox.StandardButton.Yes:
                 return
 
+        mus = all(a.eh_musica() for a in alvos)
+
         def job(msg, prog, cancelar):
-            return core.mapear(caminho, ref, arquivo, faixa, atempo, centro_ms, grupos_ms, cancelar, msg, prog)
+            return core.mapear(caminho, ref, arquivo, faixa, atempo, centro_ms, grupos_ms, cancelar, msg, prog,
+                               musica=mus)
         self._submeter(tr("Sincronizando trecho por trecho"), job, lambda m: self._aplicar_mapa(alvos, m))
 
     def _aplicar_mapa(self, alvos, m):
@@ -2606,6 +2900,7 @@ class Janela(QMainWindow):
                 a.atraso_ms, a.atempo, a.trechos = atr, 1.0, None
                 a.status = tr("um atraso só serve (%+d ms)") % atr
             self._refresh_tabela()
+            self._medir_pontas_das(alvos)
             self.aviso(tr("O mapa achou um único trecho: um atraso só (%+d ms) serve para o filme inteiro.") % atr)
             return
         for a in alvos:
@@ -2614,6 +2909,7 @@ class Janela(QMainWindow):
             a.atempo, a.atraso_ms = m["atempo"], 0
             a.status = tr("sincronia por trechos: %d trechos") % n
         self._refresh_tabela()
+        self._medir_pontas_das(alvos)
         self.aviso(tr("Sincronia por trechos pronta.\n\n%s\n\nA onda mostra a dublagem já no lugar (as emendas "
                       "ficam marcadas em vermelho). A lista completa das emendas está no Registro e na aba Emendas, onde "
                       "você pode ajustar cada uma à mão e ouvir o resultado (F8).\n\n"
@@ -3039,6 +3335,7 @@ class Janela(QMainWindow):
         if self.film and modo in ("filme", "mix"):
             filme = (self.film.caminho, ref, self.film.audios[ref].codec)
         dub = copy.deepcopy(d) if d is not None and modo in ("dub", "mix") else None
+        limite = core.limite_da_faixa(dub, self.film) if dub is not None and dub.eh_musica() and self.film else None
         if t_fim is None:
             t_fim = self.film.duracao if self.film and self.film.duracao else 1e5
         if t_ini >= t_fim - 0.2:
@@ -3047,7 +3344,7 @@ class Janela(QMainWindow):
         ferr = self.ferr
         self.onda.set_cabeca(t_ini)
         self.player.tocar(lambda cancelar: previa_audio.Previa(ferr, modo, t_ini, t_fim, filme=filme, dub=dub,
-                                                                 cancelar=cancelar), t_ini)
+                                                                 cancelar=cancelar, limite_s=limite), t_ini)
 
     def _reiniciar_audio(self):
         """Depois de uma edicao: se estava tocando, recomeca do ponto atual com o novo mapa."""
@@ -3088,7 +3385,8 @@ class Janela(QMainWindow):
                     f = fx[k[1]]
                     desc = tr("do filme: %s") % f.rotulo()
                 elif k[0] == "dub":
-                    desc = tr("dublagem: %s (%s)") % (k[1].nome, k[1].idioma or "und")
+                    desc = (tr("música: %s (%s)") if k[1].eh_musica() else tr("dublagem: %s (%s)")) % (
+                        k[1].nome, k[1].idioma or "und")
                 else:
                     desc = tr("externa: %s (%s)") % (k[1].nome or os.path.basename(k[1].arquivo), k[1].idioma or "und")
                 marcas = core.disposicao(film, k, k in (pa, pl), fx)
@@ -3101,7 +3399,8 @@ class Janela(QMainWindow):
     def _nome_marca(m):
         """Nome de uma marca (disposition) do MKV para mostrar."""
         return {"default": tr("padrão"), "forced": tr("forçada"), "comment": tr("comentário"),
-                "hearing_impaired": tr("para surdos"), "visual_impaired": tr("audiodescrição")}.get(m, m)
+                "hearing_impaired": tr("para surdos"), "visual_impaired": tr("audiodescrição"),
+                "attached_pic": tr("capa (imagem fixa)")}.get(m, m)
 
     def acao_gerar(self, teste):
         if self._ocupado() or not self.film:
@@ -3112,7 +3411,9 @@ class Janela(QMainWindow):
             self.aviso(str(e))
             return
         base = Path(self.film.caminho)
-        if self.dubs:
+        if self.dubs and all(d.eh_musica() for d in self.dubs):     # videoclipe
+            sufixo = tr("_musica_TESTE") if teste else tr("_musica")
+        elif self.dubs:
             sufixo = tr("_dublado_TESTE") if teste else tr("_dublado")
         else:                                       # sem dublagem: so reorganiza as faixas do filme
             sufixo = tr("_remux_TESTE") if teste else tr("_remux")
@@ -3164,8 +3465,13 @@ class Janela(QMainWindow):
         self.log(tr("Faixas do arquivo final, nesta ordem:"))
         for linha in self._descrever_saida(film, dubs, legs, org):
             self.log(linha)
+        ref_pos, originais = self._ref_pos(), list(self.dubs)
 
         def job(msg, prog, cancelar):
+            for i, d in enumerate(dubs, 1):              # musica: pontas medidas com outra sincronia -> mede de novo
+                if core.pontas_desatualizadas(d):
+                    msg(tr("Música %d: medindo as pontas no clipe com a sincronia atual...") % i)
+                    core.aplicar_pontas(d, core.medir_pontas(film, ref_pos, d, cancelar, msg))
             saida = core.montar(film, dubs, caminho, teste, ferr, msg, prog, cancelar, org=org, legendas=legs)
             msg(tr("ARQUIVO PRONTO: %s") % saida)
             if not posicoes:
@@ -3177,6 +3483,13 @@ class Janela(QMainWindow):
 
         def pronto(res):
             saida, conf = res
+            for orig, usada in zip(originais, dubs):     # pontas medidas agora valem tambem para a lista
+                if orig in self.dubs and usada.eh_musica() and usada.pontas_sinc == core.assinatura_sinc(orig) and \
+                        orig.pontas_sinc != usada.pontas_sinc:
+                    orig.fade_entrada, orig.fade_saida, orig.pontas_sinc = \
+                        usada.fade_entrada, usada.fade_saida, usada.pontas_sinc
+                    self.log(self._resumo_pontas(orig, {"ok": True}))
+            self._ao_selecionar()
             self.log(tr("Pronto (%s): %s") % ("ffmpeg", saida))
             linhas, mudas, fora = [], [], []
             for c in conf:
@@ -3375,6 +3688,10 @@ class Janela(QMainWindow):
             tr("Se a dublagem tiver velocidade diferente (ex.: PAL), o programa avisa e corrige só a dublagem. "
                "Se as versões tiverem cortes diferentes, ele sincroniza a dublagem trecho por trecho, e você pode "
                "ajustar cada emenda à mão e ouvir o resultado (F8) sem gerar nada.") +
+            "<br><br>" +
+            tr("Videoclipes: <i>Adicionar música</i> põe a música em alta qualidade (FLAC, MP3...) no lugar do som ruim "
+               "do clipe, sincronizada com precisão de milissegundos, terminando junto com o vídeo e com o mesmo "
+               "fade-in/fade-out do clipe.") +
             "<br><br><b>" + tr("Créditos") + "</b><br>" +
             tr("Criação, testes e direção do projeto: %s") % AUTOR + "<br>" +
             tr("Código escrito com auxílio de IA (Claude, da Anthropic).") + "<br>" +
@@ -3396,8 +3713,15 @@ class Janela(QMainWindow):
             return
         legendas = [c for c in caminhos if os.path.splitext(c)[1].lower() in core.EXT_LEGENDA + (".sub",)]
         outros = [c for c in caminhos if c not in legendas]
-        if self.film is None and outros:
-            self._carregar_filme(outros.pop(0))
+        if self.film is None and outros:            # o filme/clipe e o primeiro arquivo com imagem de verdade
+            def com_imagem(c):
+                try:
+                    return musica.tem_video(core.sondar_arquivo(c))
+                except Exception:
+                    return False
+            escolhido = next((c for c in outros if com_imagem(c)), outros[0])
+            outros.remove(escolhido)
+            self._carregar_filme(escolhido)
         if outros:
             self._adicionar_arquivos(outros)
         if legendas:
@@ -3510,6 +3834,17 @@ def autoteste(destino=None):
         assert m.para_trechos() == [[1.0, 50.0, 0.0], [52.0, 90.0, 49.0]]
         assert m.inserir_emenda(70.0, -0.5) == 1 and len(m.para_trechos()) == 3
 
+    def volume_musica():
+        # fade-in linear de 1 s a 2 s e fade-out em cosseno de 8 s a 10 s, a 100 amostras/s
+        g = musica.CurvaGanho([1.0, 2.0, "lin"], [8.0, 10.0, "cos"], 100)
+        assert g(300, 100) is None                                   # de 3 s a 4 s: volume normal, nada a fazer
+        v = g(0, 1001)
+        for i, esperado in ((50, 0.0), (150, 0.5), (200, 1.0), (900, 0.5), (1000, 0.0)):
+            assert abs(float(v[i]) - esperado) < 1e-6, (i, float(v[i]), esperado)
+        filtro, ef = core.filtro_velocidade(48000, 1.001, "fita", 240.0)     # velocidade "como fita"
+        assert "asetrate=" in filtro and abs(ef - 1.001) < 5e-7, (filtro, ef)
+        return musica.VERSAO_MUSICA
+
     def janela():
         j = Janela()
         j.show()
@@ -3524,6 +3859,7 @@ def autoteste(destino=None):
     passo("versao", lambda: VERSAO)
     passo("idiomas", idiomas)
     passo("emendas", modelo)
+    passo("musica", volume_musica)
     passo("audio-qt", lambda: "QtMultimedia " + ("ok" if TEM_AUDIO else "AUSENTE"))
     passo("janela", janela)
     passo("ffmpeg", ferramentas)

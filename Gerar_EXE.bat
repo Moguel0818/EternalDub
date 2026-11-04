@@ -11,7 +11,7 @@ rem         Gerar_EXE.bat arquivo    -> a single dist\EternalDub.exe
 
 if /i "%~1"=="arquivo" set "ETERNALDUB_UM_ARQUIVO=1"
 
-for %%F in (EternalDub_gui.py EternalDub_core.py EternalDub_emendas.py EternalDub_audio.py EternalDub_i18n.py detectar_atraso.py EternalDub.spec icone.png EternalDub.ico idiomas\en.json) do if not exist "%%F" (
+for %%F in (EternalDub_gui.py EternalDub_core.py EternalDub_emendas.py EternalDub_audio.py EternalDub_musica.py EternalDub_i18n.py detectar_atraso.py EternalDub.spec icone.png EternalDub.ico idiomas\en.json) do if not exist "%%F" (
   echo.
   echo  Falta o arquivo / Missing file: %%F
   echo  Coloque todos os arquivos do EternalDub na mesma pasta.

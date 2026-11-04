@@ -36,6 +36,7 @@ A dublagem brasileira (e a cultura de dublagem no mundo todo) é um verdadeiro t
 - **Várias dublagens de uma vez,** de um ou vários arquivos, cada uma com nome, idioma e marcação de padrão próprios.
 - **Organize o arquivo final.** A aba **Arquivo final** lista todas as faixas que podem ir para o MKV (as do próprio filme, as dublagens e as legendas adicionadas) na ordem em que vão ficar: marque o que entra (botões **Marcar tudo** / **Desmarcar tudo**), mude a ordem com **Subir/Descer** e escolha o áudio e a legenda padrão. Com a interface em português ela já começa no padrão BDRemux PT-BR: 1) áudio PT-BR, 2) áudio no idioma original, 3) legenda PT-BR. Também dá para só reorganizar um filme, sem nenhuma dublagem.
 - **Adicione legendas** como adiciona dublagens: `.srt`, `.ass`, `.ssa`, `.vtt`, `.sup`, `.idx/.sub` ou uma faixa de legenda de outro MKV/MP4, cada uma com nome, idioma, atraso e marca de *forçada*. Legendas de texto em Windows-1252 (ANSI) ou UTF-16 são convertidas para UTF-8, para os acentos saírem certos.
+- **Videoclipes: a música em alta qualidade no lugar do som ruim.** Abra o videoclipe (VHS, TV, internet) e use **Adicionar música** com o FLAC ou MP3 da mesma música (de CD, LP digitalizado...). O EternalDub mede o atraso com precisão de milissegundos, acha diferenças pequenas de velocidade (fita, placa de captura, NTSC/PAL) e corrige como numa fita (reamostrando: tempo exato e nenhum artefato), faz a música começar e terminar como no clipe (fade-in, fade-out ou corte) e termina junto com o vídeo. O som original do clipe continua no arquivo, como segunda faixa.
 - **Teste e conferência automática.** Gera primeiro um arquivo de teste de 5 minutos. Depois de juntar tudo, confere se cada dublagem tem som, está sincronizada e está bem entrelaçada com o vídeo dentro do arquivo final (áudio gravado longe do vídeo faz alguns players ficarem mudos).
 - **Tudo num lugar só.** Detecção, ajuste manual, junção e verificação acontecem numa única janela.
 - **Idiomas da interface:** português (Brasil), inglês, espanhol, francês, italiano e alemão. Cada idioma é um simples arquivo `.json` na pasta `idiomas/`, então qualquer pessoa pode acrescentar outro sem programar.
@@ -80,7 +81,7 @@ A interface abre no idioma do seu sistema quando existe tradução (senão, em i
 
 **Gerar o programa independente você mesmo**
 - Com o Python instalado: dê dois cliques em **`Gerar_EXE.bat`** (o resultado fica em `dist\EternalDub\`).
-- Sem instalar nada: no GitHub, vá em **Actions ▸ Gerar EternalDub.exe ▸ Run workflow**; em uns 5 minutos o zip aparece em **Artifacts**. Publicar uma tag de versão (por exemplo `v1.3`) também anexa os zips em **Releases**.
+- Sem instalar nada: no GitHub, vá em **Actions ▸ Gerar EternalDub.exe ▸ Run workflow**; em uns 5 minutos o zip aparece em **Artifacts**. Publicar uma tag de versão (por exemplo `v1.4`) também anexa os zips em **Releases**.
 
 ---
 
@@ -101,24 +102,37 @@ A interface abre no idioma do seu sistema quando existe tradução (senão, em i
 
 Os projetos podem ser salvos (`.eternaldub`) e reabertos depois.
 
+### Videoclipes (música em alta qualidade no lugar do som ruim)
+
+1. **Abrir filme**: escolha o videoclipe (por exemplo, a captura da fita VHS).
+2. **Adicionar música** (Ctrl+Shift+M): escolha o FLAC, MP3, M4A, OGG ou WAV da mesma música. Arrastar o arquivo para a janela também funciona: arquivos com tags de artista ou álbum entram sozinhos como música. A faixa já vem com o nome da música (tags) e o arquivo final fica no **padrão de videoclipe**: 1) a música (toca sozinha), 2) o som original do clipe.
+3. **Detectar atraso (F5)**: lê os dois arquivos inteiros (são curtos) e mede com mais rigor que numa dublagem. Se a velocidade for diferente (fita um pouco mais lenta, NTSC 0,1%, PAL 4%), escolha **Corrigir como fita** (recomendado: o tom muda junto, 0,1% = 1,7 cents, inaudível; o tempo fica exato e o som sem artefatos) ou **Corrigir mantendo o tom**.
+4. Logo depois, o EternalDub mede **as pontas**: como o clipe faz a música começar e terminar (fade-in, fade-out, corte seco, mesmo com o locutor da TV falando por cima). A música em alta qualidade faz igual, e a onda laranja mostra o volume que vai ficar. O meio da música nunca é mexido. Dá para desligar em **Seguir o clipe no começo e no fim** ou medir de novo.
+5. Ouça com **F8** (escolha *Filme + dublagem* para ouvir os dois juntos) e use **Gerar teste** / **Gerar arquivo final**. O arquivo sugerido termina em `_musica`.
+
+Se o clipe usa outra edição da música (um refrão a menos, uma pausa a mais), a detecção avisa e a **sincronia trecho por trecho** monta a música como o clipe. Quando a música cabe no vídeo sem fades nem correção de velocidade, ela entra por cópia exata (o arquivo original, sem recodificar); senão, só ela vira FLAC (sem perdas).
+
 ---
 
 ## Como funciona (técnico)
 
 - **A análise** usa uma cópia leve do áudio (mono, 8 kHz), só para medir, nunca gravada na saída. Envelopes de energia por banda do espectro são correlacionados com FFT. Várias razões de velocidade são testadas (PAL, 24 ↔ 23,976). A análise rápida lê cerca de 1 minuto mais quatro trechos de 40 segundos do filme e procura cada um numa janela maior da dublagem.
 - **A sincronia por trechos** mede o atraso a cada segundo (janelas de 6 s, até ±20 s em torno do atraso principal), escolhe o caminho mais provável com uma busca de Viterbi (o atraso só muda quando a evidência compensa, então trechos só de diálogo não criam emendas falsas), depois acha o ponto exato de cada mudança quadro a quadro (20 ms) e, entre pontos quase empatados, prefere uma pausa da dublagem. A dublagem é decodificada uma vez, na mesma linha do tempo da análise, emendada com cruzamentos de 8 ms (sem estalos) e gravada em FLAC (24 bits para fontes com perdas, 16 bits para fontes de 16 bits).
-- **A junção** usa o FFmpeg com `-c copy` e `-itsoffset` para o atraso. Atrasos negativos são aplicados com um corte da dublagem, só por cópia. Dublagens com correção de velocidade ou sincronia por trechos entram como o FLAC descrito acima, já na linha do tempo do filme. As legendas do filme entram por uma segunda leitura do mesmo arquivo: sem isso, o FFmpeg para de ler a dublagem enquanto a legenda fica sem fala, e o áudio desse intervalo vai parar longe do vídeo dentro do arquivo.
+- **A junção** usa o FFmpeg com `-c copy` e `-itsoffset` para o atraso. Atrasos negativos são aplicados com um corte da dublagem, só por cópia; como a cópia só corta entre quadros de áudio, o pedaço de quadro que sobra é devolvido com `-itsoffset` (fica exato, até 0,5 ms). Dublagens com correção de velocidade ou sincronia por trechos entram como o FLAC descrito acima, já na linha do tempo do filme. As legendas do filme entram por uma segunda leitura do mesmo arquivo: sem isso, o FFmpeg para de ler a dublagem enquanto a legenda fica sem fala, e o áudio desse intervalo vai parar longe do vídeo dentro do arquivo.
 - **Organização das faixas:** a ordem das opções `-map` é a ordem das faixas no MKV (vídeos, depois áudios, depois legendas). Cada faixa de áudio e de legenda recebe marcas explícitas (`-disposition`): exatamente um áudio padrão, no máximo uma legenda padrão, e as marcas do filme de *forçada*, *comentário*, *para surdos* e *audiodescrição* continuam; `-default_mode infer_no_subs` impede o MKV de ligar uma legenda sozinho. Legendas externas são entradas próprias: atraso positivo usa `-itsoffset`, negativo pula o começo da legenda (`-ss`). Legendas de MP4 (`mov_text`) viram SRT, a única mudança que o MKV exige. A verificação de integridade acha cada faixa original pelo hash, esteja onde estiver.
 - **Edição das emendas** (`EternalDub_emendas.py`): o mapa por trechos é editado como uma lista de emendas (tempo, silêncio inserido, pedaço removido). Mover uma emenda nunca muda o alinhamento de nenhum trecho, só o ponto em que um alinhamento passa para o outro; a dublagem sempre anda para a frente no tempo e nenhum trecho fica menor que 50 ms. Uma emenda com quantia de cerca de 0 ms é removida (só deixaria um buraco de 16 ms no som). A conferência do *som na emenda* mede o nível da dublagem em volta do ponto de corte (o pedaço removido mais 50 ms de cada lado), e o ímã procura o ponto mais próximo em que esse nível é uma pausa. Um mapa que não foi editado é salvo exatamente como veio.
 - **Prévia** (`EternalDub_audio.py`): usa o mesmo montador do arquivo final (mesmo atraso, mesma correção de velocidade, mesmos cruzamentos de 8 ms). O FFmpeg começa na linha azul (`-ss`) e blocos de 0,25 s tocam conforme são decodificados (mono, 48 kHz). Os testes automáticos comparam com a saída real: amostras idênticas sem correção de velocidade, e dentro de 1 ms com ela (o filtro `atempo` escolhe os próprios pontos de sobreposição).
+- **Videoclipes** (`EternalDub_musica.py` e `detectar_atraso.analisar_musica`): a música e o som do clipe são a mesma gravação, então a medição compara trechos do **clipe** (1/15 da duração, de 8 a 30 s) com a música, perto de onde deveriam estar (±5 s) e, se não baterem, na música inteira (edição diferente). Trechos sem a música (falas, vinheta) simplesmente não contam. Uma reta robusta (Theil-Sen) pelos trechos dá o atraso e a velocidade exata, com tolerância de 25 ms. A velocidade é corrigida reamostrando (`asetrate` sobre o áudio levado a até 16 vezes a taxa, para o arredondamento da taxa não passar de 0,5 ms). As pontas são medidas pelo ganho coerente ⟨clipe, música⟩/⟨música, música⟩ em quadros de 100 ms (80 a 1000 Hz, filtro de fase zero com bordas suaves, busca de ±2 ms para o wow): falas e chiado não se parecem com a música e quase não entram na conta. Uma curva linear, cosseno ou exponencial é ajustada; um corte seco é localizado com quadros de 20 ms. A curva de volume é aplicada pelo mesmo montador do arquivo final e da prévia.
 - **Cache:** as ondas sonoras ficam em `~/.eternaldub/cache`, então um filme é lido por inteiro só uma vez. Dá para limpar em **Ferramentas**.
-- **Arquivos:** `EternalDub_gui.py` (interface), `EternalDub_core.py` (leitura, detecção, junção, conferências), `EternalDub_emendas.py` (edição das emendas), `EternalDub_audio.py` (prévia), `detectar_atraso.py` (detecção de atraso, também usável pela linha de comando), `EternalDub_i18n.py` + `idiomas/*.json` (traduções), `EternalDub.spec` + `Gerar_EXE.bat` + `.github/workflows` (programa independente), `tests/` (testes automáticos).
+- **Arquivos:** `EternalDub_gui.py` (interface), `EternalDub_core.py` (leitura, detecção, junção, conferências), `EternalDub_emendas.py` (edição das emendas), `EternalDub_audio.py` (prévia), `EternalDub_musica.py` (videoclipes: pontas, nome pelas tags), `detectar_atraso.py` (detecção de atraso, também usável pela linha de comando), `EternalDub_i18n.py` + `idiomas/*.json` (traduções), `EternalDub.spec` + `Gerar_EXE.bat` + `.github/workflows` (programa independente), `tests/` (testes automáticos).
 
 Exemplo de linha de comando:
 ```bash
 python detectar_atraso.py FILME.mkv DUBLAGEM.mkv --faixa-dub 1 --idioma pt
 # mapa trecho por trecho (lê as duas faixas inteiras):
 python detectar_atraso.py FILME.mkv DUBLAGEM.mp4 --mapa --idioma pt
+# música num videoclipe:
+python detectar_atraso.py CLIPE.mkv MUSICA.flac --musica --idioma pt
 ```
 
 ---
@@ -129,6 +143,7 @@ python detectar_atraso.py FILME.mkv DUBLAGEM.mp4 --mapa --idioma pt
 - A detecção depende de música e efeitos sonoros em comum nas duas versões. Se a dublagem tiver trilha sonora regravada, use o alinhamento manual ou **Detectar pelo vídeo**.
 - Em discos lentos (por exemplo, HD externo em USB 2.0), ler um remux UHD demora. Salvar o arquivo final em outro disco ajuda bastante.
 - A prévia é em mono (o downmix do FFmpeg). Com correção de velocidade o tempo bate com o arquivo final em cerca de 1 ms, mas a forma de onda não é idêntica amostra por amostra.
+- **Videoclipes:** onde o clipe tem som que não é a música (falas na introdução, efeitos), a faixa da música fica em silêncio; o som original do clipe continua como segunda faixa. As pontas copiadas do clipe são uma curva lisa: um fade muito irregular (feito à mão) fica aproximado, e o começo de um fade longo pode variar cerca de 1 s quando as duas masterizações têm dinâmicas bem diferentes (o fim do fade fica a menos de 1 s, um corte seco a cerca de 10 ms).
 - Enquanto você ouve, a leitura das ondas pausa (um disco, um trabalho de cada vez) e continua quando você para.
 - O programa para Windows não tem assinatura digital e é gerado pelo fluxo automático do projeto: relate qualquer coisa estranha.
 
@@ -147,7 +162,7 @@ Issues e pull requests são bem-vindos, principalmente de quem tem experiência 
 
 - **Bugs:** abra uma [Issue](https://github.com/Moguel0818/EternalDub/issues) e cole o conteúdo da aba **Registro** (mais o `~/.eternaldub/erro.log`, se existir).
 - **Traduções:** copie `idiomas/en.json` para `idiomas/<código>.json` (por exemplo `fr.json`), troque `codigo`, `nome` e `tradutores` e traduza os valores. O idioma aparece sozinho em **Opções ▸ Idioma / Language**. Rode `python tests/test_idiomas.py` para ver o que falta ou está errado e abra um pull request.
-- **Testes:** `python -m unittest discover -s tests -t .` (precisa do FFmpeg; os testes de interface rodam sem tela). Conferem o editor de emendas, a prévia contra a saída real, as traduções e a janela principal.
+- **Testes:** `python -m unittest discover -s tests -t .` (precisa do FFmpeg; os testes de interface rodam sem tela). Conferem o editor de emendas, a prévia contra a saída real, as traduções, a janela principal e os videoclipes (com música e som de fita sintéticos).
 - Todo mundo que ajudar é creditado em [CREDITS.md](CREDITS.md) e na janela **Sobre** do programa.
 
 ## Transparência

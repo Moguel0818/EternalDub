@@ -5,8 +5,9 @@
 EternalDub_audio.py - PREVIA de audio: ouvir a dublagem (e o filme) sem gerar nenhum arquivo.
 
 A previa usa o MESMO montador do arquivo final (EternalDub_core.MontadorPedacos): a dublagem passa pela
-mesma correcao de velocidade, pelo mesmo atraso e pelas mesmas emendas, com os mesmos cruzamentos de 8 ms.
-O que se ouve aqui e o que vai para o arquivo (em mono, para ser leve).
+mesma correcao de velocidade (o mesmo filtro: core.filtro_velocidade), pelo mesmo atraso e pelas mesmas emendas, com
+os mesmos cruzamentos de 8 ms; uma musica de videoclipe tambem tem o mesmo fade-in/fade-out e termina no mesmo ponto
+(limite_s). O que se ouve aqui e o que vai para o arquivo (em mono, para ser leve).
 
 Como funciona: so e lido o trecho que vai tocar. O FFmpeg pula direto para o ponto (-ss) e decodifica
 daquele ponto em diante; o montador pula o que a dublagem nao usa e entrega o audio na linha do tempo do filme,
@@ -21,9 +22,10 @@ import threading
 import numpy as np
 
 import EternalDub_core as core
+import EternalDub_musica as musica
 from EternalDub_i18n import tr
 
-VERSAO_AUDIO = "1.3"
+VERSAO_AUDIO = "1.4"
 
 SR_PREVIA = 48000        # taxa da previa (mono, float32 -> 16 bits ao tocar)
 PRE_ROLL = 0.3           # s lidos antes do ponto de partida, so para o filtro de velocidade "aquecer"
@@ -48,11 +50,15 @@ def recortar_plano(plano, w0, w1):
     return [[o0, o1, i0 - base] for o0, o1, i0 in Q], base
 
 
-def comando_dublagem(ferr, src, idx, ss, atempo, sr):
-    """Decodifica a faixa `idx` de `src` a partir de `ss` s (tempo ORIGINAL): mono, float32, WAV no pipe."""
-    filtro = "aresample=async=1:first_pts=0"
-    if abs(1.0 / float(atempo or 1.0) - 1.0) > 1e-9:
-        filtro += ",atempo=%.8f" % atempo
+def comando_dublagem(ferr, src, idx, ss, atempo, sr, filtro=None):
+    """
+    Decodifica a faixa `idx` de `src` a partir de `ss` s (tempo ORIGINAL): mono, float32, WAV no pipe.
+    filtro: o de core.filtro_velocidade (None = correcao de velocidade com atempo, como nas dublagens).
+    """
+    if filtro is None:
+        filtro = "aresample=async=1:first_pts=0"
+        if abs(1.0 / float(atempo or 1.0) - 1.0) > 1e-9:
+            filtro += ",atempo=%.8f" % atempo
     return [ferr.ffmpeg, "-v", "error", "-nostdin", "-ss", "%.6f" % max(0.0, ss), "-i", src, "-map", "0:a:%d" % idx,
             "-vn", "-sn", "-dn", "-af", filtro, "-ac", "1", "-ar", str(sr), "-c:a", "pcm_f32le", "-f", "wav", "pipe:1"]
 
@@ -130,9 +136,11 @@ class Previa:
                'mix'   os dois somados (se o som dos dois combina, a sincronia esta certa; senao da eco)
       filme:   (caminho, faixa_de_audio, codec) da referencia (obrigatorio em 'filme' e 'mix')
       dub:     core.Dublagem (obrigatorio em 'dub' e 'mix')
+      limite_s: a dublagem/musica nao passa deste tempo do filme (core.limite_da_faixa; None = sem limite)
     """
 
-    def __init__(self, ferr, modo, t_ini, t_fim, filme=None, dub=None, sr=SR_PREVIA, cancelar=None):
+    def __init__(self, ferr, modo, t_ini, t_fim, filme=None, dub=None, sr=SR_PREVIA, cancelar=None, limite_s=None):
+        self.limite_s = float(limite_s) if limite_s else None
         if modo not in MODOS:
             raise ValueError(modo)
         if modo in ("filme", "mix") and not filme:
@@ -205,8 +213,15 @@ class Previa:
         self._saida = saida
         sr, d = self.sr, self.dub
         w0, w1 = int(round(self.t_ini * sr)), int(round(self.t_fim * sr))
-        plano = core.plano_de_pedacos(core.pedacos_efetivos(d), d.atempo, sr)
+        filtro, atempo_ef = None, d.atempo
+        if d.modo_velocidade == "fita" and abs(d.atempo - 1.0) > 1e-9:     # o mesmo filtro (e tempo) do arquivo final
+            filtro, atempo_ef = core.filtro_velocidade(core.taxa_da_faixa(d.arquivo, d.faixa, self.ferr), d.atempo,
+                                                       "fita", core.duracao_da_faixa(d))
+            # ja na taxa da previa: terminando em outra taxa, o FFmpeg (6.x) baixava o volume da mistura em mono
+            filtro += ",aresample=%d" % sr
+        plano = core.plano_de_pedacos(core.pedacos_efetivos(d), atempo_ef, sr, self.limite_s)
         P, base = recortar_plano(plano, w0, w1)
+        ganho = musica.CurvaGanho(*d.fades(), sr, inicio=w0) if d.tem_fades() else None
         mix = ref is not None
 
         def sair(x):                                         # x: dublagem deste bloco (1D)
@@ -222,8 +237,8 @@ class Previa:
             if P:
                 pre = min(base, int(round(PRE_ROLL * sr)))   # comeca um pouco antes: o filtro de velocidade aquece
                 P = [[o0, o1, i0 + pre] for o0, o1, i0 in P]
-                dec = _Processo(comando_dublagem(self.ferr, d.arquivo, d.faixa, (base - pre) / sr * d.atempo,
-                                                 d.atempo, sr), self.cancelar)
+                dec = _Processo(comando_dublagem(self.ferr, d.arquivo, d.faixa, (base - pre) / sr * atempo_ef,
+                                                 d.atempo, sr, filtro), self.cancelar)
                 try:
                     _, C, bits = core._cabecalho_wav(dec.p.stdout)
                 except RuntimeError as e:
@@ -233,7 +248,7 @@ class Previa:
                 if bits != 32 or C != 1:
                     raise RuntimeError(tr("O FFmpeg não entregou o áudio da dublagem."))
                 core.MontadorPedacos(P, 1, sr, dec.p.stdout.read, lambda arr: sair(arr[:, 0]),
-                                     self.cancelar, bloco=int(BLOCO_S * sr)).executar()
+                                     self.cancelar, bloco=int(BLOCO_S * sr), ganho=ganho).executar()
             while mix and self.entregues < self.total:         # a dublagem acabou antes: segue so o filme
                 n = min(int(BLOCO_S * sr), self.total - self.entregues)
                 y = self._ler_ref(ref, n)

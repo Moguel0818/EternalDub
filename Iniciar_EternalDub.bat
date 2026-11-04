@@ -4,7 +4,7 @@ chcp 65001 >nul
 title EternalDub
 cd /d "%~dp0"
 
-for %%F in (EternalDub_gui.py EternalDub_core.py EternalDub_emendas.py EternalDub_audio.py EternalDub_i18n.py detectar_atraso.py idiomas\en.json) do if not exist "%%F" (
+for %%F in (EternalDub_gui.py EternalDub_core.py EternalDub_emendas.py EternalDub_audio.py EternalDub_musica.py EternalDub_i18n.py detectar_atraso.py idiomas\en.json) do if not exist "%%F" (
   echo.
   echo  Falta o arquivo / Missing file: %%F
   echo  %~dp0

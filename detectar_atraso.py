@@ -21,6 +21,9 @@ Como funciona (so precisa de Python 3, numpy e FFmpeg):
   MAPA POR TRECHOS (--mapa): quando o atraso muda ao longo do filme (cortes diferentes, ou
   uma dublagem remontada por quem a publicou), mede o atraso a cada segundo e diz onde ele
   muda, para a dublagem ser montada trecho por trecho.
+  MUSICA (--musica): para pôr a musica em alta qualidade (FLAC, MP3...) num videoclipe com o som
+  ruim. E a mesma gravacao dos dois lados, entao a medicao e mais exigente (tolerancia de 25 ms,
+  janelas curtas, pequenas diferencas de velocidade de fita ou de captura).
 
 Rapidez (modo padrao): num remux UHD, quase todos os bytes do arquivo sao VIDEO. Para
 pegar o audio de um trecho, o FFmpeg tem de ler o video daquele trecho tambem. Por isso o
@@ -52,7 +55,7 @@ except ImportError:                      # o detector tambem funciona sozinho, e
     rot_conf = rot_metodo = tr
     _definir_idioma = _idioma_sistema = _idiomas_disponiveis = None
 
-VERSAO_DETECTOR = "1.3"     # tem de ser igual a do EternalDub_core.py
+VERSAO_DETECTOR = "1.4"     # tem de ser igual a do EternalDub_core.py
 
 # ----------------------------------------------------------------- configuracao
 SR_AUDIO = 8000            # taxa de amostragem usada na analise de audio
@@ -71,8 +74,14 @@ CANDIDATOS_VELOCIDADE = [
     (24 / 23.976, N_("dublagem 0,10% mais rápida que o filme (24 fps vs 23,976 fps)")),
     (23.976 / 24, N_("dublagem 0,10% mais lenta que o filme (23,976 fps vs 24 fps)")),
 ]
+# Musica num videoclipe: alem das conversoes de quadros, pequenas diferencas de velocidade de fita (VHS) ou do relogio
+# da placa de captura. A velocidade exata sai depois, da reta dos trechos medidos (DERIVA).
+_PEQUENA = N_("velocidade um pouco diferente (fita ou relógio da captura)")
+CANDIDATOS_MUSICA = CANDIDATOS_VELOCIDADE + [(x, _PEQUENA) for x in (1.002, 1 / 1.002, 1.005, 1 / 1.005, 1.01,
+                                                                      1 / 1.01, 1.02, 1 / 1.02)]
 
 Z_MIN_JANELA = 6.0         # pontuacao minima para um trecho contar como "confiavel"
+TOLERANCIA_MUSICA_MS = 25.0   # musica: a mesma gravacao dos dois lados, entao os trechos concordam bem mais
 
 
 # ----------------------------------------------------------------- FFmpeg / FFprobe
@@ -372,10 +381,10 @@ def reamostrar(b, r):
 
 
 # ----------------------------------------------------------------- analise
-def busca_global(a, b, taxa, max_offset_s):
+def busca_global(a, b, taxa, max_offset_s, candidatos=None):
     lim = int(max_offset_s * taxa)
     tabela = []
-    for r, desc in CANDIDATOS_VELOCIDADE:
+    for r, desc in candidatos or CANDIDATOS_VELOCIDADE:
         br = reamostrar(b, r)
         off, z = pico(correlacao(a, br, -lim, lim), -lim, taxa)
         tabela.append({"r": r, "desc": desc, "offset": off, "z": z})
@@ -454,6 +463,14 @@ def interpretar(janelas, escolhido, tol_s):
     # um atraso so (quando o usuario nao quer o mapa por trechos): o do trecho mais longo
     res["atraso"] = float(np.median(max(grandes, key=lambda g: len(g["y"]))["y"])) if grandes else med
     return res
+
+
+def janela_para(dur_s):
+    """
+    Tamanho dos trechos de verificacao: 60 s em filmes; em arquivos curtos (menos de 8 min), 1/8 da duracao (no minimo
+    10 s), para haver trechos suficientes para conferir (com 60 s, um curta de 3 min teria so 3).
+    """
+    return min(60.0, max(10.0, float(dur_s or 0) / 8.0))
 
 
 def analisar(nome, a, b, taxa, args):
@@ -987,6 +1004,149 @@ def detectar_rapido(ler_filme, ler_dub, dur_filme, dur_dub, max_offset=180.0, to
     return final, None
 
 
+# ----------------------------------------------------------------- MUSICA num videoclipe
+# O "filme" e o videoclipe (com o som ruim: VHS, TV, internet) e a "dublagem" e a musica em alta qualidade. E a MESMA
+# gravacao dos dois lados, entao a medicao pode ser bem mais exigente que com vozes diferentes:
+#   * os dois arquivos sao curtos: le tudo (sem a analise rapida) e usa janelas curtas (~1/15 do clipe, 8 a 30 s);
+#   * as janelas sao do CLIPE: onde ele nao tem a musica (falas, vinheta, o silencio depois do fade) a janela
+#     simplesmente nao bate, em vez de achar um refrao parecido em outro ponto da musica;
+#   * cada janela e procurada perto de onde deveria estar (+-5 s) e, se nao bater, na musica inteira (edicoes
+#     diferentes: um refrao a menos no clipe, por exemplo);
+#   * uma reta robusta (Theil-Sen) pelos trechos da o atraso e a velocidade exata (fita ou captura um pouco mais
+#     lenta, NTSC 0,1%...), com tolerancia de 25 ms. Trechos fora da reta, em sequencia e concordando entre si, sao
+#     uma edicao diferente: CORTES (sincronia trecho por trecho).
+MUSICA_NCC_MIN = 0.45      # semelhanca minima (correlacao normalizada, -1 a 1) para um trecho do clipe valer
+MUSICA_Z_MIN = 3.0         # ... junto com uma pontuacao minima (a musica se repete: picos vizinhos sao altos)
+
+
+def _casar_musica(fw, f0, dub_feat, d0, r, taxa=TAXA_AUDIO):
+    """
+    Como _casar(), mas devolve tambem a correlacao NORMALIZADA no pico (-1 a 1). Numa musica a pontuacao z fica baixa
+    mesmo no lugar certo (batidas e refroes repetidos fazem picos vizinhos altos); a correlacao normalizada diz se o
+    trecho do clipe e de fato aquele pedaco da musica. Devolve (atraso_s, z, ncc) ou (None, 0, 0).
+    """
+    br = reamostrar(dub_feat, r)
+    folga = br.shape[1] - fw.shape[1]
+    if folga < 2 * taxa:
+        return None, 0.0, 0.0
+    c = correlacao(br, fw, 0, folga)
+    lag, z = pico(c, 0, taxa)
+    k = int(np.argmax(c))
+    seg = br[:, k:k + fw.shape[1]]
+    den = float(np.sqrt(np.sum(seg.astype(np.float64) ** 2) * np.sum(fw.astype(np.float64) ** 2)))
+    ncc = float(np.sum(seg.astype(np.float64) * fw[:, :seg.shape[1]]) / den) if den > 0 else 0.0
+    return f0 - r * d0 - lag, z, ncc
+
+
+def _interpretar_musica(janelas, falhas, escolhido, tol_s):
+    boas = sorted(janelas, key=lambda j: j["t"])         # (so entram os trechos aceitos)
+    r = escolhido["r"]
+    res = {"r": r, "janelas": janelas, "n_boas": len(boas), "n_total": len(janelas) + len(falhas),
+           "z_mediano": float(np.median([j["z"] for j in boas])) if boas else 0.0,
+           "grupos": [], "extra_r": 1.0, "falhas": list(falhas), "tempo_grupos": "filme"}
+    if len(boas) < 3:
+        res.update(status="BAIXA_CONFIANCA", atraso=escolhido["offset"])
+        return res
+    t = np.array([j["t"] for j in boas])
+    y = np.array([j["offset"] for j in boas])
+    m, c = theil_sen(t, y)                         # atraso = c + m * tempo_do_clipe
+    resid = y - (m * t + c)
+    dentro = np.abs(resid) <= tol_s
+    edicao = False                                 # 2+ trechos seguidos fora da reta, concordando entre si
+    i = 0
+    while i < len(boas):
+        if not dentro[i]:
+            j = i
+            while j + 1 < len(boas) and not dentro[j + 1] and abs(resid[j + 1] - resid[j]) <= 2 * tol_s:
+                j += 1
+            if j > i:
+                edicao = True
+                break
+            i = j + 1
+        else:
+            i += 1
+    if dentro.mean() >= 0.7 and not edicao:
+        ti, yi = t[dentro], y[dentro]
+        m, c = theil_sen(ti, yi)
+        # a reta e bem medida (cada trecho erra ~1 ms): uma deriva de mais de 3 ms ao longo da musica ja e corrigida
+        if abs(m) < 1e-6 or abs(m) * float(ti.max() - ti.min()) <= min(tol_s / 2, 0.003):
+            res.update(status="OK" if abs(r - 1.0) < 1e-9 else "VELOCIDADE", atraso=float(np.median(yi)))
+        else:
+            res.update(status="DERIVA", extra_r=1.0 / (1.0 - m), atraso=c / (1.0 - m))
+        return res
+    grupos = []
+    for j in boas:                                 # trechos seguidos com o mesmo atraso
+        if grupos and abs(j["offset"] - np.median(grupos[-1]["y"])) <= max(4 * tol_s, 0.1):
+            grupos[-1]["y"].append(j["offset"])
+            grupos[-1]["fim"] = j["t"]
+        else:
+            grupos.append({"ini": j["t"], "fim": j["t"], "y": [j["offset"]]})
+    res["grupos"] = [{"ini": g["ini"] - 5, "fim": g["fim"] + 5, "atraso": float(np.median(g["y"]))} for g in grupos]
+    maior = max(grupos, key=lambda g: (len(g["y"]), -g["ini"]))
+    res.update(status="CORTES", atraso=float(np.median(maior["y"])))
+    return res
+
+
+def analisar_musica(xa, xb, max_offset_s=None, tolerancia_ms=TOLERANCIA_MUSICA_MS, janela_s=None, faixa_dub=0,
+                    cancelar=None, msg=None):
+    """
+    Deteccao para MUSICA num videoclipe (veja acima). xa: audio do clipe; xb: da musica (mono, SR_AUDIO, float32,
+    tempo original). Mesmo formato de resultado de analisar(); os tempos dos grupos sao do clipe (tempo_grupos =
+    'filme'). Convencao: tempo_clipe = r * tempo_musica + atraso.
+    """
+    msg = msg or (lambda m: None)
+    taxa = TAXA_AUDIO
+    a, b = caracteristicas_audio(xa), caracteristicas_audio(xb)
+    dur_f, dur_d = a.shape[1] / taxa, b.shape[1] / taxa
+    max_offset_s = float(max_offset_s or (max(dur_f, dur_d) + 5.0))
+    escolhido, tabela = busca_global(a, b, taxa, max_offset_s, CANDIDATOS_MUSICA)
+    r, off0 = escolhido["r"], escolhido["offset"]
+    # velocidade de fita/quadros muda o TOM junto: para comparar trecho a trecho, a musica e tocada na velocidade do
+    # clipe (como o clipe a tocou). Diferencas pequenas (<0,3%) nao mexem no tom o bastante para importar.
+    if abs(r - 1.0) > 0.003:
+        n = int(len(xb) * r)
+        bw = caracteristicas_audio(np.interp(np.arange(n) / r, np.arange(len(xb)), xb).astype(np.float32))
+        rw = 1.0
+    else:
+        bw, rw = b, r
+    dur_w = bw.shape[1] / taxa
+    J = float(janela_s or min(30.0, max(8.0, dur_f / 15.0)))
+    w = int(round(J * taxa))
+    janelas, falhas = [], []
+    for i0 in range(0, max(1, a.shape[1] - w + 1), max(1, int(round(J / 2 * taxa)))):
+        if cancelar is not None and cancelar.is_set():
+            raise Cancelado()
+        f0 = i0 / taxa
+        fw = a[:, i0:i0 + w]
+        if fw.shape[1] < w:
+            break
+        u0 = (f0 - off0) / rw                      # onde o trecho do clipe deveria estar (na musica de trabalho)
+        achou = None
+        # perto de onde deveria estar; senao, na musica inteira (edicao diferente), exigindo bem mais
+        for folga, z_min, ncc_min in ((5.0, MUSICA_Z_MIN, MUSICA_NCC_MIN), (max_offset_s, Z_MIN_JANELA + 2.0, 0.5)):
+            d0, d1 = max(0.0, u0 - folga), min(dur_w, u0 + J / rw + folga)
+            k0, k1 = int(d0 * taxa), int(d1 * taxa)
+            if (k1 - k0) * rw < w + 2 * taxa:
+                continue
+            off, z, ncc = _casar_musica(fw, f0, bw[:, k0:k1], k0 / taxa, rw, taxa)
+            if off is not None and ((z >= z_min and ncc >= ncc_min) or (z >= Z_MIN_JANELA + 2.0 and ncc >= 0.3)):
+                achou = {"t": f0 + J / 2, "offset": off, "z": z, "ncc": ncc}
+                break
+        if achou:
+            janelas.append(achou)
+        else:
+            falhas.append(f0 + J / 2)
+    res = _interpretar_musica(janelas, falhas, escolhido, tolerancia_ms / 1000.0)
+    res.update(metodo="audio", modo="completo", faixa_dub=faixa_dub, escolhido=escolhido, tabela=tabela,
+               musica=True, ncc_mediano=float(np.median([j["ncc"] for j in janelas])) if janelas else 0.0)
+    if res["status"] == "BAIXA_CONFIANCA":
+        res["confianca"] = "BAIXA"
+    else:
+        res["confianca"] = "ALTA" if res["ncc_mediano"] >= 0.6 and res["n_boas"] >= 5 and \
+            res["status"] != "CORTES" else "MEDIA"
+    return res
+
+
 # ----------------------------------------------------------------- relatorio
 def fmt_ms(s):
     return "%+d ms" % int(round(s * 1000))
@@ -1067,9 +1227,12 @@ def main():
     ap.add_argument("--faixa-filme", default="auto",
                     help=tr("faixa de áudio do filme usada como referência (número, ou 'auto' = a em inglês)"))
     ap.add_argument("--faixa-dub", type=int, default=0, help=tr("faixa de áudio da dublagem (padrão 0)"))
-    ap.add_argument("--max-offset", type=float, default=180.0, help=tr("maior atraso procurado, em segundos"))
-    ap.add_argument("--janela", type=float, default=60.0, help=tr("tamanho dos trechos de verificação (s)"))
-    ap.add_argument("--tolerancia", type=float, default=80.0, help=tr("diferença aceita entre trechos (ms)"))
+    ap.add_argument("--max-offset", type=float, default=None, help=tr("maior atraso procurado, em segundos"))
+    ap.add_argument("--janela", type=float, default=None, help=tr("tamanho dos trechos de verificação (s)"))
+    ap.add_argument("--tolerancia", type=float, default=None, help=tr("diferença aceita entre trechos (ms)"))
+    ap.add_argument("--musica", action="store_true",
+                    help=tr("música num videoclipe: a mesma gravação dos dois lados (o FLAC/MP3 no lugar do som ruim "
+                            "do clipe); lê tudo e mede com mais rigor"))
     ap.add_argument("--completo", action="store_true",
                     help=tr("lê os arquivos inteiros (lento em UHD); o padrão é a análise rápida por trechos"))
     ap.add_argument("--mapa", action="store_true",
@@ -1080,6 +1243,10 @@ def main():
     ap.add_argument("--idioma", choices=_idiomas_disponiveis() if _idiomas_disponiveis else ["pt", "en"],
                     help=tr("idioma das mensagens (padrão: o do sistema)"))
     args = ap.parse_args()
+    if args.tolerancia is None:
+        args.tolerancia = TOLERANCIA_MUSICA_MS if args.musica else 80.0
+    if args.max_offset is None and not args.musica:
+        args.max_offset = 180.0
 
     for s in (sys.stdout, sys.stderr):
         try:
@@ -1099,7 +1266,12 @@ def main():
             cf = info_f["audios"][ff].get("codec_name", "")
             cd = info_d["audios"][args.faixa_dub].get("codec_name", "")
             res = None
-            if not args.completo:
+            if args.musica:
+                print(tr("Música: lendo o áudio inteiro do clipe (faixa %d) e da música (faixa %d)...")
+                      % (ff, args.faixa_dub), file=out)
+                res = analisar_musica(carregar_audio(args.filme, ff, cf), carregar_audio(args.dublagem, args.faixa_dub, cd),
+                                      args.max_offset, args.tolerancia, args.janela, args.faixa_dub)
+            elif not args.completo:
                 res, motivo = detectar_rapido(
                     lambda t0, d: ler_pcm(args.filme, ff, t0, d, cf),
                     lambda t0, d: ler_pcm(args.dublagem, args.faixa_dub, t0, d, cd),
@@ -1112,6 +1284,8 @@ def main():
                          "em UHD isso pode levar vários minutos...") % (ff, args.faixa_dub), file=out)
                 a = caracteristicas_audio(carregar_audio(args.filme, ff, cf))
                 b = caracteristicas_audio(carregar_audio(args.dublagem, args.faixa_dub, cd))
+                if args.janela is None:                  # arquivos curtos: trechos menores (veja janela_para)
+                    args.janela = janela_para(min(a.shape[1], b.shape[1]) / TAXA_AUDIO)
                 print(tr("Comparando..."), file=out)
                 res = analisar("audio", a, b, TAXA_AUDIO, args)
             res["faixa_dub"] = args.faixa_dub
@@ -1129,6 +1303,8 @@ def main():
                 print(tr("Lendo o vídeo dos dois arquivos (pode levar vários minutos)..."), file=out)
             a = caracteristicas_video(carregar_video(args.filme))
             b = caracteristicas_video(carregar_video(args.dublagem))
+            if args.janela is None:
+                args.janela = janela_para(min(a.shape[1], b.shape[1]) / TAXA_VIDEO)
             print(tr("Comparando..."), file=out)
             resultados.append(analisar("video", a, b, TAXA_VIDEO, args))
             relatorio(resultados[-1], out)

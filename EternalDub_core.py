@@ -16,6 +16,11 @@ A unica conversao que existe e opcional, e so na DUBLAGEM (vira FLAC, sem perdas
   * corrigir a VELOCIDADE (ex.: PAL 25 fps -> 23,976 fps);
   * sincronizar TRECHO POR TRECHO, quando as versoes tem cortes diferentes (mapear()).
 O video e as faixas do filme nunca sao tocados.
+
+VIDEOCLIPES: a "dublagem" pode ser uma MUSICA (Dublagem.tipo = "musica"): o FLAC/MP3 em alta qualidade no lugar do
+som ruim do clipe. A deteccao e mais exigente (detectar_atraso.analisar_musica), a velocidade e corrigida como numa
+fita (reamostrando: o tempo fica exato e o som nao ganha artefatos), a musica termina junto com o video e segue o
+fade-in/fade-out do clipe (EternalDub_musica.medir_pontas). Veja EternalDub_musica.py.
 """
 import hashlib
 import codecs
@@ -37,12 +42,14 @@ import numpy as np
 
 from EternalDub_i18n import tr
 import detectar_atraso as da
+import EternalDub_musica as musica
 
-VERSAO_NUCLEO = "1.3"
-if getattr(da, "VERSAO_DETECTOR", None) != VERSAO_NUCLEO:
-    raise ImportError(tr("detectar_atraso.py (versão %s) e EternalDub_core.py (versão %s) não combinam.\n"
-                         "Arquivo encontrado: %s") % (getattr(da, "VERSAO_DETECTOR", tr("antiga")), VERSAO_NUCLEO,
-                                                      getattr(da, "__file__", "?")))
+VERSAO_NUCLEO = "1.4"
+for _mod, _ver in ((da, "VERSAO_DETECTOR"), (musica, "VERSAO_MUSICA")):
+    if getattr(_mod, _ver, None) != VERSAO_NUCLEO:
+        raise ImportError(tr("%s (versão %s) e EternalDub_core.py (versão %s) não combinam.\nArquivo encontrado: %s")
+                          % (os.path.basename(getattr(_mod, "__file__", "?")), getattr(_mod, _ver, tr("antiga")),
+                             VERSAO_NUCLEO, getattr(_mod, "__file__", "?")))
 
 CRIAR_SEM_JANELA = 0x08000000 if sys.platform == "win32" else 0
 CACHE_DIR = Path.home() / ".eternaldub" / "cache"
@@ -144,6 +151,10 @@ class Faixa:
     def forcada(self):
         return bool(self.disposicao.get("forced"))
 
+    def capa(self):
+        """Imagem fixa embutida (capa do disco, miniatura): o MKV a receberia como uma segunda faixa de video."""
+        return self.tipo == "video" and bool(self.disposicao.get("attached_pic"))
+
     def rotulo(self):
         partes = [self.codec]
         if self.canais:
@@ -161,6 +172,7 @@ class Arquivo:
     faixas: list = field(default_factory=list)
     duracao: float = 0.0
     inicio: float = 0.0
+    tags: dict = field(default_factory=dict)   # tags do arquivo em minusculas (artist, title, album...)
 
     def do_tipo(self, tipo):
         return [f for f in self.faixas if f.tipo == tipo]
@@ -181,6 +193,11 @@ class Arquivo:
         return self.do_tipo("video")
 
     @property
+    def imagens(self):
+        """Videos de verdade (sem as capas embutidas)."""
+        return [f for f in self.videos if not f.capa()]
+
+    @property
     def legendas(self):
         return self.do_tipo("subtitle")
 
@@ -199,9 +216,10 @@ def _flt(x):
 
 def sondar_arquivo(caminho):
     cmd = [da.FFPROBE, "-v", "error", "-show_entries",
-           "stream=index,codec_type,codec_name,channels,start_time,duration:stream_tags=language,title,DURATION"
-           ":stream_disposition=" + ",".join(("default",) + DISPOSICOES_PRESERVADAS) + ":format=duration,start_time",
-           "-of", "json", caminho]
+           "stream=index,codec_type,codec_name,channels,start_time,duration"
+           ":stream_tags=language,title,DURATION,artist,album,album_artist"
+           ":stream_disposition=" + ",".join(("default", "attached_pic") + DISPOSICOES_PRESERVADAS) +
+           ":format=duration,start_time:format_tags", "-of", "json", caminho]
     try:
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
                            creationflags=CRIAR_SEM_JANELA)
@@ -211,7 +229,14 @@ def sondar_arquivo(caminho):
         raise RuntimeError(tr("Não consegui abrir o arquivo:\n%s\n%s") % (caminho, p.stderr.decode("utf-8", "replace")))
     j = json.loads(p.stdout.decode("utf-8", "replace"))
     arq = Arquivo(caminho=caminho, duracao=_flt(j.get("format", {}).get("duration")),
-                  inicio=_flt(j.get("format", {}).get("start_time")))
+                  inicio=_flt(j.get("format", {}).get("start_time")),
+                  tags={str(k).lower(): str(v) for k, v in (j.get("format", {}).get("tags") or {}).items()})
+    for s in j.get("streams", []):           # Ogg/Opus guardam artista e titulo na faixa de audio
+        if s.get("codec_type") == "audio":
+            for k, v in (s.get("tags") or {}).items():
+                if str(k).lower() in ("artist", "album", "album_artist", "title"):
+                    arq.tags.setdefault(str(k).lower(), str(v))
+            break
     contagem = {}
     for s in j.get("streams", []):
         tipo = s.get("codec_type", "")
@@ -241,6 +266,15 @@ def faixa_ingles(arq):
         if f.idioma in ("eng", "en"):
             return f.pos
     return 0
+
+
+def fim_do_video(film):
+    """Onde a imagem do filme/clipe acaba (s): o fim da primeira faixa de video de verdade, ou a duracao do arquivo."""
+    for f in film.imagens:
+        if f.duracao > 0:
+            fim = f.inicio + f.duracao
+            return min(fim, film.duracao) if film.duracao else fim
+    return film.duracao
 
 
 # ----------------------------------------------------------------- audio para ANALISE (leve)
@@ -594,11 +628,16 @@ def resumir(res):
             "boas": res["n_boas"], "total": res["n_total"], "z": res["z_mediano"],
             "modo": res.get("modo", "completo"), "lido_filme_s": res.get("lido_filme_s"),
             "lido_dub_s": res.get("lido_dub_s"), "falhas": res.get("falhas", []),
-            "tempo_grupos": res.get("tempo_grupos", "dublagem")}
+            "tempo_grupos": res.get("tempo_grupos", "dublagem"), "musica": bool(res.get("musica"))}
 
 
-def _args_deteccao(faixa_dub=0):
-    return SimpleNamespace(max_offset=180.0, janela=60.0, tolerancia=80.0, faixa_dub=faixa_dub)
+def _args_deteccao(faixa_dub=0, dur_s=None):
+    """Parametros da analise completa (dublagens). Arquivos curtos usam trechos menores (da.janela_para)."""
+    return SimpleNamespace(max_offset=180.0, janela=da.janela_para(dur_s) if dur_s else 60.0, tolerancia=80.0,
+                           faixa_dub=faixa_dub)
+
+
+CURTO_S = 4 * 60.0        # mais curto que isto, a analise rapida nao funciona: le tudo (e pouco)
 
 
 _SONDAS = {}
@@ -613,12 +652,14 @@ def _sondar_cache(caminho):
 
 
 def detectar(film_caminho, film_pos, dub_caminho, dub_pos, cancelar=None, msg=None, prog=None, completo=False,
-             completo_se_falhar=False):
+             completo_se_falhar=False, musica=False):
     """
     Detecta o atraso. Padrao: analise RAPIDA (le ~4 min do filme, em trechos). Se ela nao achar,
     devolve status BAIXA_CONFIANCA com o motivo; a analise COMPLETA (le os arquivos inteiros) so
     acontece se pedida (completo=True) ou com completo_se_falhar=True.
     Se as duas faixas completas ja estiverem no cache, usa-as direto (sem ler nada).
+    Arquivos curtos (menos de 4 min) e MUSICA (videoclipe) sempre usam a analise completa: e pouco para ler. A musica
+    usa a medicao propria (detectar_atraso.analisar_musica: tolerancia de 25 ms, trechos do clipe).
     """
     cancelar = cancelar or threading.Event()
     msg = msg or (lambda m: None)
@@ -632,6 +673,8 @@ def detectar(film_caminho, film_pos, dub_caminho, dub_pos, cancelar=None, msg=No
         msg(tr("Aviso: a faixa da dublagem termina em %s, mas o filme vai até %s (dublagem incompleta ou de "
                "versão cortada?).") % (da.mmss(fim_d), da.mmss(fim_f)))
     if em_cache(film_caminho, film_pos) and em_cache(dub_caminho, dub_pos):
+        completo = True
+    if musica or (fim_f and fim_d and min(fim_f, fim_d) < CURTO_S):
         completo = True
     if not completo:
         res, motivo = da.detectar_rapido(
@@ -653,10 +696,16 @@ def detectar(film_caminho, film_pos, dub_caminho, dub_pos, cancelar=None, msg=No
     b = carregar_completo(dub_caminho, [dub_pos], {dub_pos: cd}, fd.duracao, cancelar,
                           ao_progresso=lambda f, s: prog(60 + int(f * 30)))[dub_pos]
     msg(tr("Comparando as duas faixas inteiras..."))
+    if musica:
+        res = da.analisar_musica(a.astype(np.float32) / 32768.0, b.astype(np.float32) / 32768.0, faixa_dub=dub_pos,
+                                 cancelar=cancelar)
+        prog(95)
+        return resumir(res)
     fa_ = da.caracteristicas_audio(a.astype(np.float32) / 32768.0)
     fb_ = da.caracteristicas_audio(b.astype(np.float32) / 32768.0)
     prog(95)
-    return resumir(da.analisar("audio", fa_, fb_, da.TAXA_AUDIO, _args_deteccao(dub_pos)))
+    return resumir(da.analisar("audio", fa_, fb_, da.TAXA_AUDIO,
+                               _args_deteccao(dub_pos, min(len(a), len(b)) / da.SR_AUDIO)))
 
 
 def detectar_video(arquivo_filme, arquivo_dub, msg=None, cancelar=None):
@@ -679,7 +728,7 @@ def _energia_10ms(pcm):
 
 
 def mapear(film_caminho, film_pos, dub_caminho, dub_pos, atempo=1.0, centro_ms=None, grupos_ms=None,
-           cancelar=None, msg=None, prog=None):
+           cancelar=None, msg=None, prog=None, musica=False):
     """
     Sincronia POR TRECHOS (versoes com cortes diferentes, ou dublagem remontada por quem a publicou).
     Le as duas faixas inteiras (o que ja esta no cache das ondas e instantaneo), mede o atraso a cada
@@ -708,7 +757,12 @@ def mapear(film_caminho, film_pos, dub_caminho, dub_pos, atempo=1.0, centro_ms=N
     if cancelar.is_set():
         raise Cancelado()
     if centro_ms is None:                      # sem deteccao antes: mede o atraso principal e a velocidade
-        res = da.analisar("audio", fa_, fb_, da.TAXA_AUDIO, _args_deteccao(dub_pos))
+        if musica:
+            res = da.analisar_musica(a.astype(np.float32) / 32768.0, b.astype(np.float32) / 32768.0,
+                                     faixa_dub=dub_pos, cancelar=cancelar)
+        else:
+            res = da.analisar("audio", fa_, fb_, da.TAXA_AUDIO,
+                              _args_deteccao(dub_pos, min(len(a), len(b)) / da.SR_AUDIO))
         if res["status"] == "BAIXA_CONFIANCA":
             raise RuntimeError(tr("Não encontrei uma correspondência confiável entre a dublagem e o filme."))
         atempo = 1.0 / (res["r"] * res["extra_r"])
@@ -737,6 +791,51 @@ def mapear(film_caminho, film_pos, dub_caminho, dub_pos, atempo=1.0, centro_ms=N
     return m
 
 
+# ----------------------------------------------------------------- pontas de uma musica (videoclipe)
+def assinatura_sinc(d):
+    """A sincronia de `d` resumida num texto: as pontas medidas so valem para a sincronia com que foram medidas."""
+    t = json.dumps(d.trechos, separators=(",", ":")) if d.trechos else ""
+    return "%d|%.9f|%s|%s" % (int(d.atraso_ms), float(d.atempo), d.modo_velocidade,
+                              hashlib.sha1(t.encode("utf-8")).hexdigest()[:12] if t else "-")
+
+
+def pontas_desatualizadas(d):
+    """A musica segue as pontas do clipe, mas elas foram medidas com outra sincronia (ou ainda nao foram medidas)."""
+    return d.eh_musica() and d.seguir_pontas and d.pontas_sinc != assinatura_sinc(d)
+
+
+def medir_pontas(film, ref_pos, d, cancelar=None, msg=None, prog=None):
+    """
+    Mede no clipe (faixa de referencia `ref_pos` do filme) como a musica `d` comeca e termina, com a sincronia atual
+    de `d`: fade-in, fade-out ou corte seco (EternalDub_musica.medir_pontas). Le o audio leve dos dois arquivos (o
+    que ja esta no cache e instantaneo). Nao muda `d`: veja aplicar_pontas(). O resultado traz 'sinc'.
+    """
+    msg = msg or (lambda m: None)
+    prog = prog or (lambda v: None)
+    fa, fd = _sondar_cache(film.caminho), _sondar_cache(d.arquivo)
+    if ref_pos >= len(fa.audios) or d.faixa >= len(fd.audios):
+        raise RuntimeError(tr("Faixa de áudio inexistente."))
+    cf, cd = fa.audios[ref_pos].codec, fd.audios[d.faixa].codec
+    a = carregar_completo(film.caminho, [ref_pos], {ref_pos: cf}, fa.duracao, cancelar,
+                          ao_progresso=lambda f, s: prog(int(f * 45)))[ref_pos]
+    b = carregar_completo(d.arquivo, [d.faixa], {d.faixa: cd}, fd.duracao, cancelar,
+                          ao_progresso=lambda f, s: prog(45 + int(f * 25)))[d.faixa]
+    msg(tr("Medindo como o clipe faz a música começar e terminar (fade-in, fade-out ou corte)..."))
+    res = musica.medir_pontas(a, b, pedacos_efetivos(d), d.atempo, da.SR_AUDIO, fim_do_video(film), cancelar)
+    if cancelar is not None and cancelar.is_set():
+        raise Cancelado()
+    res["sinc"] = assinatura_sinc(d)
+    prog(100)
+    return res
+
+
+def aplicar_pontas(d, res):
+    """Grava em `d` as pontas medidas (medir_pontas)."""
+    d.fade_entrada = list(res["entrada"]) if res.get("entrada") else None
+    d.fade_saida = list(res["saida"]) if res.get("saida") else None
+    d.pontas_sinc = res.get("sinc") or assinatura_sinc(d)
+
+
 # ----------------------------------------------------------------- projeto
 @dataclass(eq=False)                 # cada dublagem e um objeto proprio (duas iguais continuam sendo duas)
 class Dublagem:
@@ -753,9 +852,28 @@ class Dublagem:
     # segundos (ini_dub no tempo ORIGINAL da dublagem). Com trechos, atraso_ms vira um AJUSTE FINO somado
     # a todos. None = um atraso so (atraso_ms), montado por copia exata.
     trechos: list = None
+    # --- 1.4: videoclipes
+    tipo: str = "dublagem"           # "dublagem" ou "musica" (a musica em alta qualidade no lugar do som do clipe)
+    modo_velocidade: str = "tempo"   # correcao de velocidade: "tempo" (atempo: o tom nao muda) ou "fita" (reamostra:
+    #                                  o tom acompanha a velocidade, como numa fita; tempo exato e sem artefatos)
+    seguir_pontas: bool = True       # (musica) copiar do clipe o fade-in/fade-out (ou corte seco) do comeco e do fim
+    fade_entrada: list = None        # [t0, t1, forma] no tempo do filme: silencio ate t0, volume normal a partir de t1
+    fade_saida: list = None          # [t0, t1, forma]: volume normal ate t0, silencio a partir de t1
+    pontas_sinc: str = ""            # sincronia (assinatura_sinc) com que as pontas foram medidas
 
     def chave(self):
         return (os.path.abspath(self.arquivo), self.faixa)
+
+    def eh_musica(self):
+        return self.tipo == "musica"
+
+    def tem_fades(self):
+        """Uma musica que segue as pontas do clipe e tem fade-in ou fade-out medido."""
+        return self.eh_musica() and bool(self.seguir_pontas) and bool(self.fade_entrada or self.fade_saida)
+
+    def fades(self):
+        """(fade_entrada, fade_saida) que a montagem aplica (None, None se nao houver)."""
+        return (self.fade_entrada, self.fade_saida) if self.tem_fades() else (None, None)
 
 
 EXT_LEGENDA_TEXTO = (".srt", ".ass", ".ssa", ".vtt")
@@ -779,7 +897,7 @@ class LegendaExterna:
         return (os.path.abspath(self.arquivo), self.faixa)
 
 
-PROJETO_VERSAO = 5        # 5: legendas externas e organizacao do arquivo final; le 4 e anteriores
+PROJETO_VERSAO = 6        # 6: musicas (videoclipes); 5: legendas externas e organizacao; le 5 e anteriores
 
 
 def _indice(lista, obj):
@@ -943,6 +1061,24 @@ def _sondar_faixa_audio(caminho, pos, ferr):
             "canais": int(st.get("channels", 2) or 2), "bits": bits}
 
 
+_TAXAS = {}
+
+
+def taxa_da_faixa(caminho, pos, ferr):
+    """Taxa de amostragem da faixa de audio `pos` (guardada: a previa pede a cada vez que toca)."""
+    try:
+        st = os.stat(caminho)
+        k = (os.path.abspath(caminho), int(pos), st.st_size, int(st.st_mtime))
+    except OSError:
+        k = None
+    if k is None or k not in _TAXAS:
+        sr = _sondar_faixa_audio(caminho, pos, ferr)["sr"]
+        if k is None:
+            return sr
+        _TAXAS[k] = sr
+    return _TAXAS[k]
+
+
 def _cabecalho_wav(f):
     """Le o cabecalho WAV que o FFmpeg escreve num pipe. Devolve (bytes_do_fmt, canais, bits)."""
     def ler(n):
@@ -968,6 +1104,41 @@ def _cabecalho_wav(f):
         raise RuntimeError(tr("O FFmpeg não entregou o áudio da dublagem."))
     canais, bits = int.from_bytes(fmt[2:4], "little"), int.from_bytes(fmt[14:16], "little")
     return fmt, canais, bits
+
+
+def filtro_velocidade(sr, atempo, modo="tempo", dur_s=None):
+    """
+    Filtro do FFmpeg que decodifica a faixa na mesma linha do tempo da analise e corrige a velocidade.
+    Devolve (filtro, atempo_efetivo): o tempo "esticado" e tempo_original / atempo_efetivo.
+      'tempo': atempo (o tom nao muda: e o certo para falas). O filtro escolhe onde sobrepor os pedacinhos de som,
+               entao o tempo de cada som pode variar alguns ms, e em musica sustentada aparecem artefatos.
+      'fita':  reamostra, como uma fita tocando mais rapido ou mais devagar: o tom acompanha a velocidade (0,1% =
+               1,7 cents, inaudivel), o tempo fica exato e o som nao ganha artefatos. E o padrao para musica.
+               A taxa da "fita" tem de ser um numero inteiro: o audio e antes levado a K vezes a taxa (K ate 16),
+               para o arredondamento nao passar de ~0,5 ms ao longo da faixa (dur_s); a montagem usa o atempo efetivo.
+    """
+    base = "aresample=async=1:first_pts=0"
+    a = float(atempo or 1.0)
+    if abs(1.0 / a - 1.0) <= 1e-9:
+        return base, 1.0
+    if modo != "fita":
+        return base + ",atempo=%.8f" % a, a
+    sr = int(sr)
+    dur = float(dur_s or 3600.0)
+    K = 1
+    while K < 16 and dur / (2.0 * K * sr) > 0.0005:
+        K *= 2
+    R = int(round(a * K * sr))
+    return (base + (",aresample=%d" % (K * sr) if K > 1 else "") + ",asetrate=%d,aresample=%d" % (R, sr),
+            R / float(K * sr))
+
+
+def duracao_da_faixa(d):
+    """Duracao (s) da faixa de audio da dublagem/musica `d` (sondagem guardada)."""
+    try:
+        return _sondar_cache(d.arquivo).fim_audio(d.faixa) or 0.0
+    except (OSError, IndexError, RuntimeError):
+        return 0.0
 
 
 def plano_de_pedacos(pedacos, atempo, sr, limite_s=None):
@@ -1001,10 +1172,13 @@ class MontadorPedacos:
       escrever:    escrever(array float32 (k, canais)) recebe a saida, em ordem, sem lacunas.
       cancelar:    Event; acionado, a montagem para com Cancelado.
       prog:        prog(0..99), chamado ~1x por segundo.
+      ganho:       ganho(pos, n) -> ganhos (n,) ou None (= 1): volume aplicado a saida (fade-in/fade-out de uma musica,
+                   EternalDub_musica.CurvaGanho), pela posicao na linha do tempo do filme.
     Cada emenda ganha um cruzamento de 8 ms (sem estalos) e a dublagem nunca volta no tempo.
     """
 
-    def __init__(self, plano, canais, sr, ler_bytes, escrever, cancelar=None, prog=None, bloco=None):
+    def __init__(self, plano, canais, sr, ler_bytes, escrever, cancelar=None, prog=None, bloco=None, ganho=None):
+        self.ganho = ganho
         self.P = plano
         self.C = int(canais)
         self.sr = int(sr)
@@ -1040,6 +1214,10 @@ class MontadorPedacos:
     def _escrever(self, arr):
         if self.cancelar.is_set():
             raise Cancelado()
+        if self.ganho is not None:
+            g = self.ganho(self.saida, len(arr))
+            if g is not None:
+                arr = arr * g[:, None]
         self.escrever_saida(arr)
         self.saida += len(arr)
         agora = time.monotonic()
@@ -1103,25 +1281,26 @@ class MontadorPedacos:
 
 
 def montar_por_pedacos(src, idx, pedacos, atempo, saida, ferr, msg=None, prog=None, cancelar=None,
-                       limite_s=None):
+                       limite_s=None, modo_velocidade="tempo", fades=None, dur_s=None):
     """
-    Monta UMA dublagem na linha do tempo do FILME, em FLAC (sem perdas):
+    Monta UMA dublagem (ou musica) na linha do tempo do FILME, em FLAC (sem perdas):
       pedacos: [[ini_filme, fim_filme, ini_dub], ...] em segundos (ini_dub no tempo ORIGINAL da dublagem).
-      Entre os pedacos fica silencio; o que fica de fora da dublagem nao entra.
+      Entre os pedacos fica silencio; o que fica de fora da dublagem nao entra; nada passa de limite_s.
     A faixa e decodificada UMA vez, com a mesma linha do tempo da analise (aresample first_pts=0, que
-    respeita o atraso embutido no arquivo), passa pela correcao de velocidade (atempo) se houver, e cada
-    emenda ganha um cruzamento de 8 ms (sem estalos): veja MontadorPedacos. O arquivo final comeca no
-    tempo 0 do filme.
+    respeita o atraso embutido no arquivo), passa pela correcao de velocidade se houver (filtro_velocidade:
+    modo 'tempo' ou 'fita'), e cada emenda ganha um cruzamento de 8 ms (sem estalos): veja MontadorPedacos.
+      fades: (fade_entrada, fade_saida) de uma musica (EternalDub_musica.ganho_fades), no tempo do filme.
+      dur_s: duracao da faixa (so para a precisao do modo 'fita').
+    O arquivo final comeca no tempo 0 do filme.
     """
     msg = msg or (lambda m: None)
     prog = prog or (lambda v: None)
     cancelar = cancelar or threading.Event()
     info = _sondar_faixa_audio(src, idx, ferr)
     sr = info["sr"]
-    filtro = "aresample=async=1:first_pts=0"
-    if abs(1.0 / float(atempo or 1.0) - 1.0) > 1e-9:
-        filtro += ",atempo=%.8f" % atempo
-    P = plano_de_pedacos(pedacos, atempo, sr, limite_s)
+    filtro, atempo_ef = filtro_velocidade(sr, atempo, modo_velocidade, dur_s)
+    P = plano_de_pedacos(pedacos, atempo_ef, sr, limite_s)
+    ganho = musica.CurvaGanho(fades[0], fades[1], sr) if fades and (fades[0] or fades[1]) else None
     if not P:
         raise RuntimeError(tr("Nenhum pedaço da dublagem cai dentro do filme."))
     bits_flac = ["-sample_fmt", "s16"] if info["codec"] in ("pcm_s16le", "pcm_s16be", "flac", "alac") \
@@ -1145,7 +1324,7 @@ def montar_por_pedacos(src, idx, pedacos, atempo, saida, ferr, msg=None, prog=No
                           (b"\0" if len(fmt) & 1 else b"") + b"data\xff\xff\xff\xff")
         MontadorPedacos(P, C, sr, p_dec.stdout.read,
                         lambda arr: p_enc.stdin.write(np.ascontiguousarray(arr, dtype="<f4").tobytes()),
-                        cancelar, prog).executar()
+                        cancelar, prog, ganho=ganho).executar()
         p_enc.stdin.close()
         rc = p_enc.wait()
         if rc != 0:
@@ -1209,24 +1388,62 @@ def pedacos_efetivos(d):
     return [[max(0.0, aj), 1e7, max(0.0, -aj) * d.atempo]]
 
 
+def limite_da_faixa(d, film, teste=False):
+    """Ate onde (s do filme) a faixa montada vai: a musica termina junto com a imagem; a dublagem, 1 s depois do fim."""
+    if d.eh_musica():
+        fim = fim_do_video(film) or ((film.duracao or 0) + 1.0)
+        return min(300.0, fim) if teste else fim
+    return 300.0 if teste else (film.duracao or 0) + 1.0
+
+
+def vai_virar_flac(d, film=None):
+    """
+    A faixa entra no arquivo como FLAC montado (e nao por copia exata)? Com correcao de velocidade, sincronia por
+    trechos e, numa musica, com as pontas copiadas do clipe ou quando ela passaria do fim do video.
+    """
+    if d.trechos or abs(d.atempo - 1.0) > 1e-9:
+        return True
+    if d.eh_musica():
+        if d.tem_fades():
+            return True
+        if film is not None:
+            fim, dur = fim_do_video(film), duracao_da_faixa(d)
+            if fim and dur and d.atraso_ms / 1000.0 + dur > fim + 0.05:
+                return True
+    return False
+
+
 def _preparar_dublagens(dubs, film, tmp, ferr, msg, prog=None, cancelar=None, teste=False):
     """
-    Dublagens com correcao de velocidade ou sincronia por trechos viram FLAC ja na linha do tempo do filme
-    (atraso 0). As outras seguem por copia exata, com o atraso aplicado na juncao.
+    Dublagens com correcao de velocidade ou sincronia por trechos (e musicas com pontas ou mais longas que o video)
+    viram FLAC ja na linha do tempo do filme (atraso 0). As outras seguem por copia exata, com o atraso aplicado
+    na juncao.
     """
     prog = prog or (lambda v: None)
     fontes = []
     for i, d in enumerate(dubs, 1):
         src, idx, atraso = d.arquivo, d.faixa, d.atraso_ms
-        if d.trechos or abs(d.atempo - 1.0) > 1e-9:
-            if d.trechos:
+        if vai_virar_flac(d, film):
+            if d.eh_musica():
+                if d.trechos:
+                    msg(tr("Música %d: montando trecho por trecho (%d trechos; só esta faixa vira FLAC, sem "
+                           "perdas)...") % (i, len(d.trechos)))
+                elif abs(d.atempo - 1.0) > 1e-9:
+                    msg(tr("Música %d: corrigindo a velocidade (só esta faixa vira FLAC, sem perdas)...") % i)
+                else:
+                    msg(tr("Música %d: seguindo o clipe no começo e no fim (só esta faixa vira FLAC, sem perdas)...")
+                        % i)
+            elif d.trechos:
                 msg(tr("Dublagem %d: montando trecho por trecho (%d trechos; só esta dublagem vira FLAC, "
                        "sem perdas)...") % (i, len(d.trechos)))
             else:
                 msg(tr("Dublagem %d: corrigindo a velocidade (só esta dublagem vira FLAC, sem perdas)...") % i)
             novo = os.path.join(tmp, "dub%d_sincronizada.mka" % i)
+            fita = d.modo_velocidade == "fita"
             montar_por_pedacos(src, idx, pedacos_efetivos(d), d.atempo, novo, ferr, msg, prog, cancelar,
-                               limite_s=300.0 if teste else (film.duracao or 0) + 1.0)
+                               limite_s=limite_da_faixa(d, film, teste), modo_velocidade=d.modo_velocidade,
+                               fades=d.fades(),
+                               dur_s=duracao_da_faixa(d) if fita else None)
             src, idx, atraso = novo, 0, 0
         fontes.append({"d": d, "src": src, "idx": idx, "atraso": atraso})
     return fontes
@@ -1241,8 +1458,15 @@ def faixas_mantidas(film, manter=None):
 
 
 def validar_manter(film, manter):
-    if manter is not None and not any(f.tipo == "video" for f in faixas_mantidas(film, manter)):
+    reais = film.imagens                       # (uma capa embutida nao conta como video)
+    if manter is not None and not any(f.tipo == "video" and (f in reais or not reais)
+                                      for f in faixas_mantidas(film, manter)):
         raise RuntimeError(tr("Mantenha pelo menos uma faixa de vídeo do filme."))
+
+
+def faixas_padrao(film):
+    """Indices das faixas do filme que entram quando nada foi escolhido: todas, menos as capas embutidas."""
+    return set(f.idx for f in film.faixas if f.tipo in TIPOS_ESCOLHIVEIS and not f.capa())
 
 
 # ----------------------------------------------------------------- organizacao do arquivo final
@@ -1362,6 +1586,10 @@ def disposicao(film, k, padrao, _cache=None):
 
 def organizar_padrao(film, dubs=(), legendas=(), idioma_original=None):
     """
+    VIDEOCLIPE (alguma faixa adicionada e musica): 1) as musicas, na ordem da lista (a primeira toca sozinha),
+    2) o som original do clipe (a primeira faixa dele que nao e comentario; a do idioma original, se escolhido),
+    3) as outras faixas adicionadas. As legendas seguem a regra abaixo.
+
     O padrao de BDRemux do EternalDub (pedido do criador do projeto):
       audio:   1) as dublagens em PT-BR (na ordem da lista)  2) as faixas PT-BR que o filme ja tem
                3) a faixa principal do idioma original (a primeira dele que nao e comentario nem audiodescricao)
@@ -1383,20 +1611,31 @@ def organizar_padrao(film, dubs=(), legendas=(), idioma_original=None):
             if k[0] == "filme":
                 manter.add(f.idx)
 
-    for f in film.videos:
+    for f in film.imagens or film.videos:                      # (as capas embutidas ficam de fora)
         por(f)
-    for d in dubs:                                             # 1) dublagens PT-BR
-        if eh_ptbr(d.idioma, d.nome):
+    musicas = [d for d in dubs if d.eh_musica()]
+    if musicas:                                                # videoclipe
+        for d in musicas:                                      # 1) a musica em alta qualidade
             por(None, ("dub", d))
-    for f in film.audios:                                      # 2) PT-BR do proprio filme
-        if eh_ptbr(f.idioma, f.titulo) and not eh_extra(f):
-            por(f)
-    principais = [f for f in film.audios if not eh_extra(f) and not eh_ptbr(f.idioma, f.titulo)]
-    original = next((f for f in principais if (f.idioma or "").lower() == idioma_original), None)
-    if original is None and not eh_portugues(idioma_original):  # idioma sem marca no arquivo: a 1a nao-PT
-        original = next((f for f in principais if (f.idioma or "") in ("", "und")), None)
-    if original is not None:                                   # 3) idioma original
-        por(original)
+        principais = [f for f in film.audios if not eh_extra(f)]
+        original = next((f for f in principais if (f.idioma or "").lower() == idioma_original), None) \
+            if idioma_original else None
+        original = original or (principais[0] if principais else None)
+        if original is not None:                               # 2) o som original do clipe
+            por(original)
+    else:
+        for d in dubs:                                         # 1) dublagens PT-BR
+            if eh_ptbr(d.idioma, d.nome):
+                por(None, ("dub", d))
+        for f in film.audios:                                  # 2) PT-BR do proprio filme
+            if eh_ptbr(f.idioma, f.titulo) and not eh_extra(f):
+                por(f)
+        principais = [f for f in film.audios if not eh_extra(f) and not eh_ptbr(f.idioma, f.titulo)]
+        original = next((f for f in principais if (f.idioma or "").lower() == idioma_original), None)
+        if original is None and not eh_portugues(idioma_original):  # idioma sem marca no arquivo: a 1a nao-PT
+            original = next((f for f in principais if (f.idioma or "") in ("", "und")), None)
+        if original is not None:                               # 3) idioma original
+            por(original)
     for d in dubs:                                             # 4) outras dublagens adicionadas
         por(None, ("dub", d))
     ext_pt = [x for x in legendas if eh_ptbr(x.idioma, x.nome)]
@@ -1413,6 +1652,16 @@ def organizar_padrao(film, dubs=(), legendas=(), idioma_original=None):
         por(None, ("leg", x))
     resto = [k for k in completar_ordem(film, dubs, legendas) if k not in ordem]   # desmarcadas, no fim
     return Organizacao(ordem=ordem + resto, manter=manter, padrao_audio=None, padrao_legenda=None)
+
+
+def musicas_primeiro(film, dubs=(), legendas=(), ordem=None):
+    """A ordem com as musicas (videoclipe) no comeco dos audios, na ordem da lista; o resto fica como estava."""
+    ordem = completar_ordem(film, dubs, legendas, ordem)
+    mus = [("dub", d) for d in dubs if d.eh_musica()]
+    resto = [k for k in ordem if k not in mus]
+    fx = _faixa_por_idx(film)
+    i = next((j for j, k in enumerate(resto) if tipo_da_chave(film, k, fx) == "audio"), len(resto))
+    return resto[:i] + mus + resto[i:]
 
 
 def posicoes_para_conferencia(film, dubs, legendas, org, ref_pos):
@@ -1482,6 +1731,17 @@ def _preparar_legendas(legendas, tmp, msg):
     return saida
 
 
+def inicio_do_arquivo(caminho, ferr):
+    """Tempo inicial do arquivo (s), como o FFmpeg o ve ao junta-lo (0 se nao der para ler)."""
+    try:
+        p = subprocess.run([ferr.ffprobe, "-v", "error", "-show_entries", "format=start_time", "-of", "json", caminho],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                           creationflags=CRIAR_SEM_JANELA, timeout=60)
+        return max(0.0, _flt(json.loads(p.stdout.decode("utf-8", "replace")).get("format", {}).get("start_time")))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return 0.0
+
+
 # ----------------------------------------------------------------- comando final
 def comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar=None, org=None, legendas=(), manter=None):
     """
@@ -1514,18 +1774,25 @@ def comando_ffmpeg(film, fontes, saida, teste, ferr, tmp, msg, cancelar=None, or
     entradas, mapa_dub = {}, {}
     for k, f in enumerate(fontes, 1):
         d, src, idx, atraso = f["d"], f["src"], f["idx"], f.get("atraso", f["d"].atraso_ms)
+        offset = "%dms" % atraso if atraso > 0 else None
         if atraso < 0:
             msg(tr("Dublagem %d: cortando o começo da dublagem (cópia exata, sem recodificar)...") % k)
             corte = os.path.join(tmp, "dub%d_corte.mka" % k)
             _rodar([ferr.ffmpeg, "-y", "-v", "error", "-nostdin", "-i", src, "-map", "0:a:%d" % idx, "-c", "copy",
                     "-ss", "%dms" % (-atraso), corte], cancelar=cancelar)
+            # A copia so corta entre quadros de audio: o primeiro quadro que fica comeca um pouco DEPOIS do ponto
+            # pedido (ate 1 quadro: ~21 ms em AAC, 32 ms em AC3, ~90 ms em FLAC), e o arquivo cortado guarda esse resto
+            # como o seu tempo inicial. Ao juntar, o FFmpeg leva cada entrada para o zero e jogaria o resto fora (a
+            # dublagem ficaria adiantada). O -itsoffset devolve o resto: fica exato (ate 0,5 ms, o arredondamento do MKV).
+            resto = inicio_do_arquivo(corte, ferr)
             src, idx, atraso = corte, 0, 0
-        chave = (os.path.abspath(src), atraso)
+            offset = "%.6f" % resto if resto > 0 else None
+        chave = (os.path.abspath(src), offset)
         if chave not in entradas:
             entradas[chave] = n_entradas
             n_entradas += 1
-            if atraso > 0:
-                cmd += ["-itsoffset", "%dms" % atraso]
+            if offset:
+                cmd += ["-itsoffset", offset]
             cmd += ["-i", src]
         mapa_dub[id(d)] = "%d:a:%d" % (entradas[chave], idx)
     entrada_leg = None

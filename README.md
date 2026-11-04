@@ -36,6 +36,7 @@ Brazilian dubbing (and dubbing culture worldwide) is a true treasure that deserv
 - **Several dubs at once,** from one or many files, each with its own name, language and default flag.
 - **Organize the final file.** The **Final file** tab lists every track that can go into the MKV (the movie's own, the dubs and the added subtitles) in the order they will have: tick what goes in (**Check all** / **Uncheck all** buttons), change the order with **Up/Down** and pick the default audio and subtitle. With the interface in Portuguese it starts in the PT-BR BDRemux layout: 1) PT-BR audio, 2) the original-language audio, 3) PT-BR subtitles. It can also just reorganize a movie, with no dub at all.
 - **Add subtitles** like you add dubs: `.srt`, `.ass`, `.ssa`, `.vtt`, `.sup`, `.idx/.sub` or a subtitle track from another MKV/MP4, each with a name, language, delay and *forced* flag. Text subtitles in Windows-1252 or UTF-16 are converted to UTF-8 so accents come out right.
+- **Music videos: the high-quality song in place of the poor sound.** Open the music video (VHS, TV, internet) and use **Add music** with the FLAC or MP3 of the same song (from a CD, a digitized LP...). EternalDub measures the delay to the millisecond, finds small speed differences (tape, capture card, NTSC/PAL) and corrects them like a tape (resampling: exact timing and no artifacts), makes the song start and end as in the clip (fade-in, fade-out or cut) and ends it together with the video. The clip's original sound stays in the file as a second track.
 - **Test and automatic check.** It makes a 5-minute test file first. After muxing, it checks that every dub has sound, is in sync and is well interleaved with the video inside the final file (audio written far away from its video makes some players go silent).
 - **All in one place.** Detection, manual adjustment, muxing and verification happen in a single window.
 - **Interface languages:** Portuguese (Brazil), English, Spanish, French, Italian and German. Each language is a plain `.json` file in `idiomas/`, so anyone can add another one without programming.
@@ -80,7 +81,7 @@ The interface opens in your system language when a translation exists (otherwise
 
 **Building the standalone program yourself**
 - With Python installed: double-click **`Gerar_EXE.bat`** (the result is in `dist\EternalDub\`).
-- Without installing anything: on GitHub, go to **Actions ▸ Gerar EternalDub.exe ▸ Run workflow**; in about 5 minutes the zip appears under **Artifacts**. Publishing a version tag (e.g. `v1.3`) also attaches the zips to **Releases**.
+- Without installing anything: on GitHub, go to **Actions ▸ Gerar EternalDub.exe ▸ Run workflow**; in about 5 minutes the zip appears under **Artifacts**. Publishing a version tag (e.g. `v1.4`) also attaches the zips to **Releases**.
 
 ---
 
@@ -101,24 +102,37 @@ The interface opens in your system language when a translation exists (otherwise
 
 Projects can be saved (`.eternaldub`) and reopened later.
 
+### Music videos (the high-quality song in place of the poor sound)
+
+1. **Open movie**: choose the music video (for example, the capture of the VHS tape).
+2. **Add music** (Ctrl+Shift+M): choose the FLAC, MP3, M4A, OGG or WAV of the same song. Dragging the file onto the window also works: files with artist or album tags come in as music by themselves. The track gets the song's name (tags) and the final file uses the **music video layout**: 1) the song (plays automatically), 2) the clip's original sound.
+3. **Detect delay (F5)**: reads both files in full (they are short) and measures more strictly than for a dub. If the speed differs (a tape running a little slow, NTSC 0.1%, PAL 4%), choose **Correct like a tape** (recommended: the pitch changes with it, 0.1% = 1.7 cents, inaudible; the timing is exact and the sound has no artifacts) or **Correct keeping the pitch**.
+4. Right after that, EternalDub measures **the start and end**: how the clip makes the song come in and go out (fade-in, fade-out, hard cut, even with the TV announcer talking over it). The high-quality song does the same, and the orange waveform shows the volume it will have. The middle of the song is never touched. You can turn it off in **Follow the clip at the start and the end** or measure again.
+5. Listen with **F8** (choose *Movie + dub* to hear both together) and use **Make test** / **Make final file**. The suggested file name ends in `_music`.
+
+If the clip uses another edit of the song (one chorus less, an extra pause), detection says so and **section-by-section sync** assembles the song like the clip. When the song fits in the video with no fades and no speed correction, it goes in by exact copy (the original file, not re-encoded); otherwise only the song becomes FLAC (lossless).
+
 ---
 
 ## How it works (technical)
 
 - **Analysis** uses a lightweight copy of the audio (mono, 8 kHz), used only to measure, never written to the output. Band-energy envelopes from the spectrum are cross-correlated with FFT. Several speed ratios are tested (PAL, 24 ↔ 23.976). The quick analysis reads about 1 minute plus four 40-second excerpts of the movie and searches for each one in a larger window of the dub.
 - **Section sync** measures the delay every second (6-second windows, up to ±20 s around the main delay), picks the most likely path with a Viterbi search (the delay only changes when the evidence pays for the change, so stretches with dialogue only don't create false splices), then finds the exact point of each change frame by frame (20 ms) and, among near-ties, prefers a pause in the dub. The dub is decoded once on the same timeline used by the analysis, assembled with 8 ms crossfades at the splices (no clicks) and written to FLAC (24-bit for lossy sources, 16-bit for 16-bit sources).
-- **Muxing** uses FFmpeg with `-c copy` and `-itsoffset` for the delay. Negative delays are applied with a copy-only trim of the dub. Dubs with speed correction or section sync go in as the FLAC described above, already on the movie's timeline. The movie's subtitles come in through a second read of the same file: without it, FFmpeg stops reading the dub while the subtitle track has no line, and the audio of that gap ends up far away from its video inside the file.
+- **Muxing** uses FFmpeg with `-c copy` and `-itsoffset` for the delay. Negative delays are applied with a copy-only trim of the dub; since a copy can only cut between audio frames, the leftover part of the frame is given back with `-itsoffset` (exact, within 0.5 ms). Dubs with speed correction or section sync go in as the FLAC described above, already on the movie's timeline. The movie's subtitles come in through a second read of the same file: without it, FFmpeg stops reading the dub while the subtitle track has no line, and the audio of that gap ends up far away from its video inside the file.
 - **Track layout:** the order of the `-map` options is the order of the tracks in the MKV (videos, then audios, then subtitles). Every audio and subtitle track gets explicit flags (`-disposition`): exactly one default audio, at most one default subtitle, and the movie's *forced*, *commentary*, *hearing impaired* and *visual impaired* flags are kept; `-default_mode infer_no_subs` stops the MKV from turning a subtitle on by itself. External subtitles are separate inputs: a positive delay uses `-itsoffset`, a negative one skips the beginning of the subtitle (`-ss`). MP4 subtitles (`mov_text`) become SRT, the only change the MKV requires. The integrity check matches every original track by hash wherever it ended up.
 - **Splice editing** (`EternalDub_emendas.py`): a section map is edited as a list of splices (time, silence inserted, piece removed). Moving a splice never changes the alignment of any section, only where one alignment hands over to the next; the dub always moves forward in time and no section is shorter than 50 ms. A splice whose amount is about 0 ms is removed (it would only leave a 16 ms dip in the sound). The *sound at the splice* check measures the dub's level around the cut point (the removed piece plus 50 ms on each side), and the magnet looks for the nearest spot where that level is a pause. A map that was not edited is saved exactly as it came.
 - **Preview** (`EternalDub_audio.py`): it uses the same assembler as the final file (same delay, speed correction and 8 ms crossfades). FFmpeg starts at the blue line (`-ss`) and 0.25 s blocks are played as they are decoded (mono, 48 kHz). The automated tests compare it with the real output: identical samples without speed correction, within 1 ms with it (the `atempo` filter picks its own overlap points).
+- **Music videos** (`EternalDub_musica.py` and `detectar_atraso.analisar_musica`): the song and the clip's sound are the same recording, so detection compares sections of the **clip** (1/15 of its length, 8 to 30 s) with the song, near where they should be (±5 s) and, if they don't match, across the whole song (different edit). Sections without the song (speech, station idents) simply don't count. A robust line (Theil-Sen) through the sections gives the delay and the exact speed, with a 25 ms tolerance. Speed is corrected by resampling (`asetrate` on the audio brought up to 16 times its rate, so rounding the rate never costs more than 0.5 ms). The start and end are measured from the coherent gain ⟨clip, song⟩/⟨song, song⟩ in 100 ms frames (80 to 1000 Hz, zero-phase filter with smooth edges, ±2 ms search for tape wow): speech and hiss don't look like the song and barely count. A linear, cosine or exponential curve is fitted; a hard cut is located with 20 ms frames. The volume curve is applied by the same assembler as the final file and the preview.
 - **Cache:** waveforms are stored in `~/.eternaldub/cache`, so a movie is read in full only once. You can clear it in **Tools**.
-- **Files:** `EternalDub_gui.py` (interface), `EternalDub_core.py` (reading, detection, muxing, checks), `EternalDub_emendas.py` (splice editing), `EternalDub_audio.py` (preview), `detectar_atraso.py` (delay detection, also usable from the command line), `EternalDub_i18n.py` + `idiomas/*.json` (translations), `EternalDub.spec` + `Gerar_EXE.bat` + `.github/workflows` (standalone program), `tests/` (automated tests).
+- **Files:** `EternalDub_gui.py` (interface), `EternalDub_core.py` (reading, detection, muxing, checks), `EternalDub_emendas.py` (splice editing), `EternalDub_audio.py` (preview), `EternalDub_musica.py` (music videos: start/end, name from tags), `detectar_atraso.py` (delay detection, also usable from the command line), `EternalDub_i18n.py` + `idiomas/*.json` (translations), `EternalDub.spec` + `Gerar_EXE.bat` + `.github/workflows` (standalone program), `tests/` (automated tests).
 
 Command line example:
 ```bash
 python detectar_atraso.py MOVIE.mkv DUB.mkv --faixa-dub 1 --idioma en
 # section-by-section map (reads both whole tracks):
 python detectar_atraso.py MOVIE.mkv DUB.mp4 --mapa --idioma en
+# a song in a music video:
+python detectar_atraso.py CLIP.mkv SONG.flac --musica --idioma en
 ```
 
 ---
@@ -129,6 +143,7 @@ python detectar_atraso.py MOVIE.mkv DUB.mp4 --mapa --idioma en
 - Detection relies on music and sound effects shared by both versions. If the dub has a re-recorded soundtrack, use manual alignment or **Detect by video**.
 - On slow disks (for example, an external HDD on USB 2.0), reading a UHD remux takes time. Saving the final file to a different disk helps a lot.
 - The preview is mono (FFmpeg's downmix). With speed correction the timing matches the final file to about 1 ms, but the waveform is not sample-identical.
+- **Music videos:** where the clip has sound that is not the song (speech in the intro, effects), the music track is silent; the clip's original sound stays as the second track. The start and end copied from the clip are a smooth curve: a very irregular (hand-made) fade comes out approximate, and the start of a long fade can be off by about 1 s when the two masters have very different dynamics (the end of the fade stays within 1 s, a hard cut within about 10 ms).
 - While you listen, the waveform reading pauses (one disk, one job) and continues when you stop.
 - The Windows program is not code-signed, and it was built by the project's automatic workflow: please report anything odd.
 
@@ -147,7 +162,7 @@ Issues and pull requests are welcome, especially from people with experience in 
 
 - **Bugs:** open an [Issue](https://github.com/Moguel0818/EternalDub/issues) and paste the contents of the **Log** tab (plus `~/.eternaldub/erro.log`, if it exists).
 - **Translations:** copy `idiomas/en.json` to `idiomas/<code>.json` (e.g. `fr.json`), change `codigo`, `nome` and `tradutores`, and translate the values. The language appears by itself in **Options ▸ Idioma / Language**. Run `python tests/test_idiomas.py` to see what is missing or wrong, and open a pull request.
-- **Tests:** `python -m unittest discover -s tests -t .` (needs FFmpeg; the interface tests run without a screen). They check the splice editor, the preview against the real output, the translations and the main window.
+- **Tests:** `python -m unittest discover -s tests -t .` (needs FFmpeg; the interface tests run without a screen). They check the splice editor, the preview against the real output, the translations, the main window and music videos (with a synthetic song and tape sound).
 - Everyone who helps is credited in [CREDITS.md](CREDITS.md) and in the program's **About** window.
 
 ## Transparency

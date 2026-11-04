@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-VERSAO_IDIOMAS = "1.3"
+VERSAO_IDIOMAS = "1.4"
 
 NOME_PT = "Português (Brasil)"
 _atual = "pt"
